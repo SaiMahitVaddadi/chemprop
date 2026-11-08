@@ -1,6 +1,6 @@
 # Series outline
 
-Seven posts, alternating between practitioner-facing and systems-facing register.
+Eight posts, alternating between practitioner-facing and systems-facing register.
 
 | # | post | track | state |
 |---|---|---|---|
@@ -11,26 +11,33 @@ Seven posts, alternating between practitioner-facing and systems-facing register
 | 5 | [The cache tolerates 4 bits. The weights don't.](05-quantization-asymmetry.md) | practitioner | regression only |
 | 6 | [The depth experiment that didn't work](06-depth-experiment.md) | both | complete |
 | 7 | [Chemprop is already computing the Hashimoto matrix, in the wrong factorization](07-hashimoto.md) | systems | complete, not recommended |
+| 8 | [The one feature that attacks radius](08-rwse-radius.md) | both | complete |
 
 ## Narrative arc
 
 1 and 2 are the setup: redundancy exists, and in the message-passing loop it is exactly
-exploitable. 3 is the conceptual turn — why the obvious analogy fails and what replaces it. 4 is
-the practical payoff and the shortest path to a real speedup. 5 is the compression result. 6 is the
-negative result and the series' spine. 7 is the deepest technical finding and the one that does
-*not* get recommended, which is the honest ending.
+exploitable. 3 is the conceptual turn — why the obvious analogy fails, what replaces it, and the γ
+sweep showing Chemprop's reverse-term coefficient is a sharp optimum. 4 is the practical payoff and
+the shortest path to a real speedup. 5 is the compression result. 6 is the negative result and the
+series' spine. 7 is the deepest technical finding and the one that does *not* get recommended. 8
+resolves the radius-versus-depth tension the whole series circles, and closes by noting that the
+architecture investigation mostly validated Chemprop rather than improving it.
 
 ## Open gaps, by post
 
 - **2** — the cache is a prototype in a standalone harness verified bitwise-identical to Chemprop's
   math, not integrated into `chemprop train`.
-- **3** — the traversal direction (canonical ordered message passing, learned γ) is unexecuted.
-  `experiments/gamma_ablation.py` is written and unrun.
+- **3** — no canonical-order model was trained, so the traversal idea is argued down (physics,
+  key instability, batching) rather than measured down. γ at 0.5 and 2.0 at depth 6 unrun.
 - **4** — the ORT-MLX `ScatterND` vs `ScatterElements` execution-provider claim is unverified; no
   `onnxruntime` in the measurement environment.
 - **5** — every classification verdict is inconclusive; no trained MLP head; nothing above 2,200
   molecules.
+- **6** — the truncation and from-scratch results disagree in sign; the decisive experiment
+  (re-pretraining CheMeleon at depth 3–4) is unrun.
 - **7** — `torch.compile` on the bucketed kernel is blocked by an Inductor Metal codegen bug.
+- **8** — RWSE is measured on one dataset from scratch; using it with CheMeleon needs re-pretraining
+  because it changes `W_i`'s width.
 
 ## Things to keep when editing
 
@@ -44,3 +51,6 @@ Three habits carry most of the credibility and are easy to edit out by accident:
 - **Measured vs reasoned stays separated.** Where a number is arithmetic rather than wall-clock,
   the posts say so — post 7's traffic claim is the clearest case, since counting `torch.cat`
   dropped it from 2.06× to 1.14×.
+- **Post 6 does not say depth reduction is "dead."** It said that in an earlier draft, before the
+  from-scratch numbers came in with the opposite sign. The two tests bracket the question; the
+  honest word is *unresolved*.

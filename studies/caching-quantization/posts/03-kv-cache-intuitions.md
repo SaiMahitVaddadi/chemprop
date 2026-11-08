@@ -84,21 +84,67 @@ scheduling connection runs deeper than it looks: priority-ordered relaxation *is
 GNN aggregation is known to align with Bellman-Ford, so "traversal order" and "graph algorithm"
 are the same question wearing different hats.
 
-Two serious objections, both of which I'd want answered before believing it:
+Prefix reuse is genuinely available, too: with *rooted* canonical SMILES, **75.9% of token
+positions are reusable** across a 400-analog library, against 63.2% unrooted. So the mechanism
+isn't the problem.
 
-1. **Imposing an order breaks permutation invariance.** Canonicalisation recovers it in principle,
-   but canonical orders are not stable under small edits — and small edits are precisely the
-   workload. A canonical order that reshuffles when you add a fluorine gives you a cache that
-   misses on exactly the molecules you cared about.
-2. **Serialisation is poison for throughput.** Chemprop's forward is fully vectorised over a flat
+Three objections are, and the first is the one that actually kills it:
+
+1. **The causality it needs is physically false.** Ordered traversal only buys prefix reuse if the
+   scaffold's representation doesn't depend on its substituents. But that dependence is *real
+   chemistry* — it is the Hammett effect. An electron-withdrawing para substituent genuinely
+   changes the electronic environment of the ring it sits on. So the 47–91% dirty fraction above
+   is not cache inefficiency waiting to be engineered away; **it is the model correctly reporting
+   a physical effect.** A cache that skipped it would be a worse model. This is the real reason
+   the idea fails, and unlike the other two it is not fixable.
+2. **Imposing an order breaks permutation invariance, and the canonical order isn't stable.**
+   Canonicalisation recovers invariance in principle, but RDKit canonical ranks shift for up to
+   **69% of scaffold atoms** on a single R-group swap — so the key is unsound on exactly the edits
+   that constitute the workload. It also breaks `mol_atom_bond.py`, where per-atom and per-bond
+   targets must stay aligned to input order.
+3. **Serialisation is poison for throughput.** Chemprop's forward is fully vectorised over a flat
    batch of ~13,600 directed bonds. A priority-ordered sweep might cross the graph in fewer
    parameterised layers while being far slower in wall-clock. This is the kind of idea that wins
    on hops-per-sweep and loses on GPU utilisation, and I would expect it to lose.
+
+The scheduling idea also has a cleaner negative than I expected. Algorithmic-alignment work
+favours **Bellman-Ford** — a *synchronous* relaxation — over Dijkstra's priority order. Chemprop's
+forward pass already *is* synchronous Bellman-Ford over the line graph, so it implements the
+aligned algorithm; a Dijkstra schedule would align it with the wrong one while destroying batching
+and breaking ONNX export, which is already fragile (issue #1335).
 
 RNN- and transformer-over-traversal models (tree-LSTMs over DFS order, SMILES sequence models)
 already have the causal property and already support KV caching trivially. They have also
 historically underperformed D-MPNN on molecular property prediction, which is some evidence that
 the order-imposing trade is not free.
+
+## What the reverse term is actually worth
+
+Chemprop has hard-coded that coefficient at 1 since 2019, justified by analogy to avoiding
+"totters". Yang et al. reported the comparison as largely not statistically significant, which has
+been read loosely ever since as "it doesn't much matter." It matters. Sweeping γ on ESOL
+(`d_h=300`, scaffold-grouped 5-fold, two seeds):
+
+| γ | depth 3 | depth 6 |
+|---|---|---|
+| 0.0 — ordinary random walk | 1.1982 | 1.3453 |
+| 0.5 | 1.1805 | — |
+| **1.0 — Chemprop / Hashimoto** | **1.0326** | **1.1031** |
+| ≈2.0 | 1.1725 | — |
+
+Non-backtracking is worth **13.8% at depth 3 and 18.0% at depth 6**, and γ=1 is a *sharp optimum*
+rather than a plateau — 0.5 and 2.0 are both clearly worse. The benefit **grows with depth**,
+which is what the operator algebra predicts: redundant back-and-forth walks accumulate faster the
+longer the walk.
+
+The non-significant reading compared three confounded architectures. A one-parameter sweep isn't
+confounded, and it says Chemprop's hard-coded `−1` is right — better motivated than its own paper
+established.
+
+**And an important negative from the same experiment: a learned γ does not learn.** Initialised at
+0, 1 and 2 it converged to 0.004, 1.001 and 1.996 — it stays wherever you put it. The gradient
+signal is too weak to move it. So this is a hyperparameter to sweep, not a parameter to fit. I
+recommended the learnable version before running it, and that was wrong.
 
 ## The design rule this gives you
 
@@ -113,9 +159,9 @@ M_e = Σ_{f: dest(f)=src(e)} H_f  −  1 · H_rev(e)
 - **Weighted walks** (learned attention over the directed line graph, or chemistry-derived weights
   from bond order and conjugation): the weights are functions of the local environment, so the WL
   key is unchanged and only the cached *value* changes. **Cacheability preserved exactly.**
-- **A learned γ on the reverse term** (γ=1 is Chemprop, γ=0 is an ordinary random walk): one
-  scalar, same key. **Preserved.** This is also the cheapest interesting experiment in the whole
-  series and nobody appears to have run it since 2019; the code is written and unrun.
+- **A γ coefficient on the reverse term** (γ=1 is Chemprop, γ=0 is an ordinary random walk): one
+  scalar, same key. **Preserved.** This was the cheapest interesting experiment in the series and
+  it has now been run — see below. Sweep γ as a fixed hyperparameter; do *not* make it learnable.
 - **Bidirectional channels:** separate forward/reverse weights. **Preserved.**
 - **Multi-hop per layer** (aggregate 1-, 2-, 3-hop simultaneously): radius per layer grows, so
   each layer's key covers a larger environment. **Cacheability gets worse.** And it's FLOP-neutral
@@ -133,12 +179,17 @@ carry most of the signal, and depth is the weakest scaling axis.
 The measurements here (dirty-set fractions, environment counts, hit rates) are real. The traversal
 direction is a research question I have *not* executed: no canonical-order model was trained, and
 the γ ablation is written but unrun. I'd rather label that clearly than imply the conclusion is
-settled, because the honest summary is "the obvious analogy fails, the replacement works, and the
-thing that would make the original analogy correct is untested."
+settled.
+
+What is *not* executed is a trained canonical-order model, so the traversal idea is argued down on
+three grounds rather than measured down. I think the physics objection is decisive on its own and
+needs no experiment; the other two are engineering objections a determined implementation might
+dent. Also unrun: γ at 0.5 and 2.0 at depth 6, and the wider depth sweep.
 
 ## Reproducing
 
 ```bash
-python scripts/analog.py          # dirty-set locality, analog-series hit rates
-python experiments/gamma_ablation.py --quick   # written, not yet run
+python scripts/analog.py            # dirty-set locality, analog-series hit rates
+python scripts/gamma_ablation.py    # the γ sweep
+python scripts/traversal_prefix.py  # rooted-canonical prefix reuse, rank stability
 ```

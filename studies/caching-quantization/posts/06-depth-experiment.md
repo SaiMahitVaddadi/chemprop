@@ -114,8 +114,7 @@ distilling *worsens* task RMSE rather than closing the gap — which is interpre
 anomalous: forcing an imperfect imitation of an unreachable target is worse than letting the ridge
 head adapt to whatever the depth-3 embedding actually is.
 
-So the +15–30% is genuine information loss, not readout mismatch. **Depth reduction is dead
-absent a full retrain.**
+So the +15–30% is genuine information loss, not readout mismatch. The cheap explanation is gone.
 
 One asymmetry is worth stating carefully, because it is the kind of thing that is easy to
 overclaim in either direction. These are truncations of a checkpoint *trained* at depth 6, with
@@ -124,6 +123,39 @@ that shallow models are viable. A *large* gap is only weak evidence against a **
 depth-3 encoder — it shows depth-6 features are not reconstructible from three rounds, not that no
 good depth-3 representation exists. What it does do is remove the cheap explanation. A full
 retrain is now the only route, and it is a much more expensive experiment than this one.
+
+## And then the other direction disagreed
+
+Everything above truncates a checkpoint trained at depth 6. The complementary experiment is to
+*train* at each depth from scratch and see what you get. On ESOL, `d_h=300`, scaffold-grouped
+5-fold, two seeds:
+
+| trained depth | RMSE |
+|---|---|
+| 3 | **1.0326** |
+| 6 | 1.1031 |
+
+**Trained from scratch, depth 3 beats depth 6** — the opposite sign from the truncation result.
+
+Before reading too much into that: these are small from-scratch models on one 500-molecule
+dataset, not CheMeleon, and they are not comparable to the frozen-encoder numbers above in
+absolute terms. But the sign is the point, and there is a second clue pointing the same way. A
+probe around the trained configuration finds error rising on *both* sides of it — depth 7 is +9.7%
+and depth 8 is +15.0% relative to the trained depth. Error that grows in both directions is the
+signature of **distance from the trained configuration**, not of information content. Which is
+precisely what truncation measures and cannot separate.
+
+So the two tests bracket the question rather than settling it. Truncation says depth-6 *features*
+need six rounds to construct. From-scratch training says a depth-3 *model* can be at least as good
+as a depth-6 one. Both can be true: a shallow network can learn a different, equally predictive
+representation rather than a degraded copy of the deep one — which is exactly the scenario the
+distillation experiment was unable to rule out, because its target was the depth-6 embedding.
+
+The decisive experiment is to **re-pretrain CheMeleon at depth 3 or 4** and compare on downstream
+tasks. That is a far more expensive run than anything in this series, and it is unrun. So the
+honest status is: *depth reduction is not dead, it is unresolved, and the cheap ways of resolving
+it are exhausted.* I had written "dead" here before the from-scratch numbers came in, which was
+overclaiming from one direction of evidence.
 
 ## The part I got wrong twice
 
@@ -160,8 +192,9 @@ doesn't rescue depth 3 — because the alignment is real but the accuracy cost i
 
 ## What survives
 
-The depth lever is closed. What remains is that the caching result stands on its own at depth 6,
-with no architectural multiplier: a median **2.89× under scaffold shift**, 9–11× on congeneric
+The depth lever is open but unresolved, and resolving it costs a pretraining run. What stands
+regardless is that the caching result holds on its own at depth 6, with no architectural
+multiplier: a median **2.89× under scaffold shift**, 9–11× on congeneric
 series like BACE, and 1.65× on diverse sets like QM9.
 
 It is also worth noting what the literature does *not* offer here. Across the rewiring and
@@ -183,6 +216,7 @@ this entire line of investigation.
 python scripts/depth_accuracy.py      # the truncation table
 python scripts/wo_distill_pooled.py   # the identifiable readout refit
 python scripts/tension.py             # the headroom/cost correlation
+python scripts/depth_sweep.py         # from-scratch training at each depth
 ```
 
 Every results JSON carries its caveat in a top-level `caveat` field, so the depth-6-training

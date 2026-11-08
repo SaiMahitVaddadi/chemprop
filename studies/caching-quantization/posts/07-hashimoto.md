@@ -56,7 +56,14 @@ derivation alongside:
 
 Maximum deviation 0.87 percentage points. `nnz(B)/row = 1.413` — **`B` is sparser than a gather**,
 with roughly 10% of rows entirely empty (terminal atoms, whose only incoming edge is the one they
-must exclude). The crossover condition holds on **all 9 datasets tested**, including HIV with its
+must exclude).
+
+This was independently reproduced from the opposite direction. A separate strand of this project
+arrived at the same operator from inductive-bias reasoning rather than memory traffic, and measured
+`nnz(B)/row = 1.360` on a different molecule set — within 2% — along with 12.7% empty rows and the
+identity itself at `max |message(H) − B·H| = 0.000e+00`. It also noted a consequence I'd missed:
+**`B` is nilpotent on acyclic molecules**, since a non-backtracking walk on a tree must eventually
+run out of edges. More on what that implies in Part 8. The crossover condition holds on **all 9 datasets tested**, including HIV with its
 larger fused-ring systems (5.17 against a threshold of 10.55). No outliers.
 
 The bucketed implementation is pleasingly small. Group edges by `nnz`, and you get exactly four

@@ -53,9 +53,10 @@ Pooled across 11 datasets, maximum achievable hit rate for directed-bond environ
 |---|---|---|---|---|---|---|
 | hit rate | 99.9% | 97.2% | 87.9% | 77.1% | 67.9% | 60.6% |
 
-The decay is the central constraint on this whole idea. A radius-5 environment around an atom in a
-21-heavy-atom molecule covers most of the molecule, so sub-molecular caching degenerates toward
-per-molecule caching as depth grows. **Reuse is governed by receptive-field radius, not by layer
+The decay is the central constraint on this whole idea, and it has a measurable cause: **at radius
+6, 69.2% of atom environments are the entire molecule.** A radius-5 environment around an atom in a
+21-heavy-atom molecule covers most of it, so sub-molecular caching degenerates toward per-molecule
+caching as depth grows. **Reuse is governed by receptive-field radius, not by layer
 count** — a distinction that cost me an entire experiment, which is Part 6.
 
 ## Two engineering details that decide whether it's worth anything
