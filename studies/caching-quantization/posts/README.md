@@ -26,7 +26,9 @@ architecture investigation mostly validated Chemprop rather than improving it.
 ## Open gaps, by post
 
 - **2** — the cache is a prototype in a standalone harness verified bitwise-identical to Chemprop's
-  math, not integrated into `chemprop train`.
+  math, not integrated into `chemprop train`. The determinism section's sampler findings use
+  faithful standalone copies of Chemprop's samplers (Chemprop isn't importable in the measurement
+  env), so re-verify against the real classes before filing anything upstream.
 - **3** — no canonical-order model was trained, so the traversal idea is argued down (physics,
   key instability, batching) rather than measured down. γ at 0.5 and 2.0 at depth 6 unrun.
 - **4** — the ORT-MLX `ScatterND` vs `ScatterElements` execution-provider claim is unverified; no

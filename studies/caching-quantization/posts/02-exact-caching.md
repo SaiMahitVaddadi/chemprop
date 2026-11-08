@@ -38,7 +38,8 @@ provably have identical hidden states under any fixed weights.
 
 I checked that rather than assuming it. Across 11 MoleculeNet datasets, edges sharing a radius-*r*
 key have hidden states agreeing to **≤7e-7** — float32 roundoff. So unique-key counts are not an
-estimate of how much reuse exists; they are the exact minimal cache size.
+estimate of how much reuse exists; they are the exact minimal cache size. That 7e-7 deserves an
+explanation, and it gets one further down: it is a property of the device, not of the key.
 
 One subtlety worth flagging, because getting it wrong gives you a cache that is silently wrong:
 the WL invariants must match the featurizer's invariants. RDKit's default Morgan invariants omit
@@ -144,6 +145,80 @@ signal that falls out of the cache for free — no distance metric to calibrate,
 no density estimate. I think this is the most underrated consequence of keying on exact
 environments rather than on learned embeddings, and I haven't evaluated it properly yet.
 
+## Determinism: where that 7e-7 comes from
+
+An exact cache needs an exact forward pass. "Same key implies same hidden state" is only true if
+computing the hidden state twice gives the same answer twice — and float addition is
+non-associative, so a scatter that accumulates in a different order produces a different result in
+the low bits. The 7e-7 above is therefore ambiguous: either the WL key is slightly imprecise, which
+would be a correctness bug, or the scatter is nondeterministic, which is a device property.
+
+It's the second. Running the same `index_add_` twice on identical inputs:
+
+| | repeatable across identical runs |
+|---|---|
+| CPU, `deterministic=False` | **True** |
+| CPU, `deterministic=True` | **True** |
+| MPS, `deterministic=False` | False |
+| **MPS, `deterministic=True`** | **False** |
+
+On CPU the cache is **bitwise** exact and the 7e-7 never appears. On MPS it's exact to ~1e-6 and no
+better. Two things follow.
+
+First, a bug worth reporting: **`torch.use_deterministic_algorithms(True)` on MPS neither raises
+nor works** for these ops in torch 2.11. It silently ignores the request. And
+`chemprop/cli/train.py:1826-1829` couples the two — passing `--pytorch-seed` sets Lightning's
+`deterministic=True`, omitting it sets `False`. So on Apple Silicon `--pytorch-seed` gives you a
+reproducible *seed* and a non-reproducible *forward pass*, with no warning that the second half of
+the promise wasn't kept.
+
+Second, and more usefully: **the cache is itself a determinism mechanism.** A hit returns a stored
+value — no reduction, no accumulation, no ordering. So at an 87.9% hit rate, 88% of hidden states
+are bitwise reproducible by construction, on any backend. Higher hit rate means more determinism,
+for free. Relatedly, the Hashimoto kernel in Part 7 is gather-and-add with no atomics and no write
+contention, which makes it deterministic *by construction* — no flag, no slow path. That is an
+argument for it I under-weighted when I ranked it on speed alone.
+
+The practical constraint this puts on persistence: if you write an environment cache to disk and
+reuse it in a later process, cached values must match what that process would compute. Without
+bitwise determinism they don't, and you get batches of mixed provenance whose inconsistency share
+*grows with hit rate*. So the cache key has to include the compute environment — torch version,
+device, dtype, deterministic flag — not just the molecular environment.
+
+## Determinism will not reduce your seed variance
+
+Worth separating, because the terms get used interchangeably. **Run-to-run variance at fixed seed**
+is what `use_deterministic_algorithms` removes. **Seed variance** — different init, batch order,
+dropout masks — is untouched by it. **Split variance** dominates both, at 4–12% CV on random splits
+and 8–56% including scaffold splits. The ~1e-6 from nondeterminism is four orders of magnitude
+below the 2.3% paired-delta resolution limit, and about 100× below the int4 cache quantization error
+we accept at +0.25%. For accuracy purposes it is irrelevant.
+
+The data layer is where determinism actually bites, because **batch order changes the optimization
+trajectory, so it changes the converged model rather than its low-order bits.** Three hazards in
+Chemprop's current path, all measured:
+
+- **`class_balance=True` with `seed=None` is silently nondeterministic.** It's a legal call, and
+  `ClassBalanceSampler` builds `np.random.default_rng(None)`. Confirmed: three runs, three
+  different orders.
+- **`shuffle=True` with `seed=None` falls through to torch's global RNG.** Reproducible only if
+  nothing else in the process consumed random numbers between `manual_seed` and iteration. Passing
+  `generator=` would isolate it; `build_dataloader` doesn't.
+- **`SeededSampler` is stateful across epochs.** The generator is built in `__init__` and shuffled
+  in `__iter__`, so the epoch→order mapping depends on *how many times the loader was iterated*. A
+  sanity-check pass, a validation hook or a profiler run permanently desynchronises every later
+  epoch of an otherwise reproducible run. Per-epoch reshuffling is correct; the coupling to call
+  count is the hazard.
+
+And one smaller thing at the dataset level: `normalize_targets()` reduces over the training rows, so
+a different row order perturbs the scaler in its low bits (measured max difference 2.3e-13), and
+that perturbation then multiplies every target. Tiny, but it means "same seed, same split,
+different shard order" is not bitwise identical either.
+
+If you want reproducible Chemprop runs today: pass `--pytorch-seed`, never combine `class_balance`
+with an unset seed, don't iterate the training loader outside the training loop, and on Apple
+Silicon don't believe the forward pass is deterministic just because you asked.
+
 ## Status
 
 Honest scoping: this is a prototype in a standalone harness that reproduces Chemprop's
@@ -161,4 +236,6 @@ implies about which graph architectures are cacheable at all.
 python scripts/env_cache_study.py   # hit rate by radius
 python scripts/cached_mpnn3.py      # the scheduled cache, exactness + timings
 python scripts/cache_hits.py        # the 11-dataset hit-rate study
+python experiments/determinism_probe.py   # kernel-level: where the 7e-7 comes from
+python experiments/determinism_data.py    # dataloader/sampler/scaler hazards
 ```
