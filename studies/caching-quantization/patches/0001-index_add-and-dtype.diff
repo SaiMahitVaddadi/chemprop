@@ -1,0 +1,146 @@
+diff --git a/chemprop/featurizers/molgraph/molecule.py b/chemprop/featurizers/molgraph/molecule.py
+index 46a12946..c65ffc6e 100644
+--- a/chemprop/featurizers/molgraph/molecule.py
++++ b/chemprop/featurizers/molgraph/molecule.py
+@@ -66,7 +66,7 @@ class SimpleMoleculeMolGraphFeaturizer(_MolGraphFeaturizerMixin, GraphFeaturizer
+             V = np.zeros((1, self.atom_fdim), dtype=np.single)
+         else:
+             V = np.array([self.atom_featurizer(a) for a in mol.GetAtoms()], dtype=np.single)
+-        E = np.empty((2 * n_bonds, self.bond_fdim))
++        E = np.empty((2 * n_bonds, self.bond_fdim), dtype=np.single)
+         edge_index = [[], []]
+ 
+         if atom_features_extra is not None:
+diff --git a/chemprop/nn/agg.py b/chemprop/nn/agg.py
+index e4ac328b..52179492 100644
+--- a/chemprop/nn/agg.py
++++ b/chemprop/nn/agg.py
+@@ -71,14 +71,13 @@ class MeanAggregation(Aggregation):
+     """
+ 
+     def forward(self, H: Tensor, batch: Tensor) -> Tensor:
+-        index_torch = batch.unsqueeze(1).repeat(1, H.shape[1])
+         dim_size = batch.max().int() + 1
+-        sums = torch.zeros(dim_size, H.shape[1], dtype=H.dtype, device=H.device).scatter_reduce_(
+-            self.dim, index_torch, H, reduce="sum", include_self=False
++        sums = torch.zeros(dim_size, H.shape[1], dtype=H.dtype, device=H.device).index_add_(
++            self.dim, batch, H
+         )
+         ones = torch.ones(H.shape[0], 1, dtype=H.dtype, device=H.device)
+-        counts = torch.zeros(dim_size, 1, dtype=H.dtype, device=H.device).scatter_reduce_(
+-            self.dim, batch.unsqueeze(1), ones, reduce="sum", include_self=False
++        counts = torch.zeros(dim_size, 1, dtype=H.dtype, device=H.device).index_add_(
++            self.dim, batch, ones
+         )
+         return sums / counts.clamp(min=1)
+ 
+@@ -93,10 +92,9 @@ class SumAggregation(Aggregation):
+     """
+ 
+     def forward(self, H: Tensor, batch: Tensor) -> Tensor:
+-        index_torch = batch.unsqueeze(1).repeat(1, H.shape[1])
+         dim_size = batch.max().int() + 1
+-        return torch.zeros(dim_size, H.shape[1], dtype=H.dtype, device=H.device).scatter_reduce_(
+-            self.dim, index_torch, H, reduce="sum", include_self=False
++        return torch.zeros(dim_size, H.shape[1], dtype=H.dtype, device=H.device).index_add_(
++            self.dim, batch, H
+         )
+ 
+ 
+@@ -128,11 +126,10 @@ class AttentiveAggregation(Aggregation):
+     def forward(self, H: Tensor, batch: Tensor) -> Tensor:
+         dim_size = batch.max().int() + 1
+         attention_logits = self.W(H).exp()
+-        Z = torch.zeros(dim_size, 1, dtype=H.dtype, device=H.device).scatter_reduce_(
+-            self.dim, batch.unsqueeze(1), attention_logits, reduce="sum", include_self=False
++        Z = torch.zeros(dim_size, 1, dtype=H.dtype, device=H.device).index_add_(
++            self.dim, batch, attention_logits
+         )
+         alphas = attention_logits / Z[batch]
+-        index_torch = batch.unsqueeze(1).repeat(1, H.shape[1])
+-        return torch.zeros(dim_size, H.shape[1], dtype=H.dtype, device=H.device).scatter_reduce_(
+-            self.dim, index_torch, alphas * H, reduce="sum", include_self=False
++        return torch.zeros(dim_size, H.shape[1], dtype=H.dtype, device=H.device).index_add_(
++            self.dim, batch, alphas * H
+         )
+diff --git a/chemprop/nn/ffn.py b/chemprop/nn/ffn.py
+index ca78ead1..21553864 100644
+--- a/chemprop/nn/ffn.py
++++ b/chemprop/nn/ffn.py
+@@ -120,17 +120,15 @@ class ConstrainerFFN(nn.Module, HasHParams, HyperparametersMixin):
+         expk = k.exp()
+ 
+         n_mols = constraints.shape[0]
+-        index_torch = batch.unsqueeze(1).repeat(1, k.shape[1])
+         per_mol_sum_expk = torch.zeros(
+             n_mols, expk.shape[1], dtype=expk.dtype, device=expk.device
+-        ).scatter_reduce_(0, index_torch, expk, reduce="sum", include_self=False)
++        ).index_add_(0, batch, expk)
+         by_atom_or_bond_sum_expk = per_mol_sum_expk[batch]
+         w = expk / (by_atom_or_bond_sum_expk)
+ 
+-        index_torch = batch.unsqueeze(1).repeat(1, preds.shape[1])
+         per_mol_preds = torch.zeros(
+             n_mols, preds.shape[1], dtype=preds.dtype, device=preds.device
+-        ).scatter_reduce_(0, index_torch, preds, reduce="sum", include_self=False)
++        ).index_add_(0, batch, preds)
+ 
+         pred_has_constraint = ~torch.isnan(constraints)[0]
+         deviation = constraints[:, pred_has_constraint] - per_mol_preds[:, pred_has_constraint]
+diff --git a/chemprop/nn/message_passing/base.py b/chemprop/nn/message_passing/base.py
+index 42f756c6..3a44e301 100644
+--- a/chemprop/nn/message_passing/base.py
++++ b/chemprop/nn/message_passing/base.py
+@@ -205,9 +205,8 @@ class _MessagePassingBase(MessagePassing, HyperparametersMixin):
+             M = self.message(H, bmg)
+             H = self.update(M, H_0)
+ 
+-        index_torch = bmg.edge_index[1].unsqueeze(1).repeat(1, H.shape[1])
+-        M = torch.zeros(bmg.V.shape[0], H.shape[1], dtype=H.dtype, device=H.device).scatter_reduce_(
+-            0, index_torch, H, reduce="sum", include_self=False
++        M = torch.zeros(bmg.V.shape[0], H.shape[1], dtype=H.dtype, device=H.device).index_add_(
++            0, bmg.edge_index[1], H
+         )
+         return self.finalize(M, bmg.V, V_d)
+ 
+diff --git a/chemprop/nn/message_passing/mixins.py b/chemprop/nn/message_passing/mixins.py
+index ca2d46f7..4380acb2 100644
+--- a/chemprop/nn/message_passing/mixins.py
++++ b/chemprop/nn/message_passing/mixins.py
+@@ -9,10 +9,9 @@ class _BondMessagePassingMixin:
+         return self.W_i(torch.cat([bmg.V[bmg.edge_index[0]], bmg.E], dim=1))
+ 
+     def message(self, H: Tensor, bmg: BatchMolGraph) -> Tensor:
+-        index_torch = bmg.edge_index[1].unsqueeze(1).repeat(1, H.shape[1])
+         M_all = torch.zeros(
+             bmg.V.shape[0], H.shape[1], dtype=H.dtype, device=H.device
+-        ).scatter_reduce_(0, index_torch, H, reduce="sum", include_self=False)[bmg.edge_index[0]]
++        ).index_add_(0, bmg.edge_index[1], H)[bmg.edge_index[0]]
+         M_rev = H[bmg.rev_edge_index]
+ 
+         return M_all - M_rev
+@@ -24,7 +23,6 @@ class _AtomMessagePassingMixin:
+ 
+     def message(self, H: Tensor, bmg: BatchMolGraph):
+         H = torch.cat((H, bmg.E), dim=1)
+-        index_torch = bmg.edge_index[1].unsqueeze(1).repeat(1, H.shape[1])
+         return torch.zeros(
+             bmg.V.shape[0], H.shape[1], dtype=H.dtype, device=H.device
+-        ).scatter_reduce_(0, index_torch, H, reduce="sum", include_self=False)[bmg.edge_index[0]]
++        ).index_add_(0, bmg.edge_index[1], H)[bmg.edge_index[0]]
+diff --git a/chemprop/nn/message_passing/mol_atom_bond.py b/chemprop/nn/message_passing/mol_atom_bond.py
+index 089af105..d28fe0c6 100644
+--- a/chemprop/nn/message_passing/mol_atom_bond.py
++++ b/chemprop/nn/message_passing/mol_atom_bond.py
+@@ -295,9 +295,8 @@ class _MABMessagePassingBase(MABMessagePassing, HyperparametersMixin):
+             M = self.message(H, bmg)
+             H = self.update(M, H_0)
+ 
+-        index_torch = bmg.edge_index[1].unsqueeze(1).repeat(1, H.shape[1])
+-        M = torch.zeros(bmg.V.shape[0], H.shape[1], dtype=H.dtype, device=H.device).scatter_reduce_(
+-            0, index_torch, H, reduce="sum", include_self=False
++        M = torch.zeros(bmg.V.shape[0], H.shape[1], dtype=H.dtype, device=H.device).index_add_(
++            0, bmg.edge_index[1], H
+         )
+ 
+         H_v = self.vertex_finalize(M, bmg.V, V_d) if self.return_vertex_embeddings else None
