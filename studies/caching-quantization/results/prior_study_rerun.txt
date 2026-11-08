@@ -1,0 +1,85 @@
+CheMeleon: d_h=2048 depth=6 | real pretrained weights, 8.71M params
+  W_i  (2048, 86)     std=0.2068 amax=2.524 p99.9=1.279 kurtosis=9.9
+  W_h  (2048, 2048)   std=0.2171 amax=4.110 p99.9=1.089 kurtosis=6.0
+  W_o  (2048, 2120)   std=0.2310 amax=7.606 p99.9=1.419 kurtosis=12.7
+
+ESOL: 500 molecules, 6635 atoms, target=logSolubility
+
+fp32 baseline (frozen CheMeleon + ridge head): test RMSE=1.0115 MAE=0.7532
+target std = 2.082  (so RMSE 1.011 is a real signal)
+
+--- WEIGHT quantization (all three matrices; activations stay fp32) ---
+format                      bits     RMSE    dRMSE     MAE    rel L2     cos
+fp32 (reference)              32   1.0115    +0.0%  0.7532  0.00e+00 1.00000
+bf16                          16   1.0104    -0.1%  0.7524  9.08e-04 1.00000
+fp16                          16   1.0117    +0.0%  0.7534  1.11e-04 1.00000
+MXFP8 e4m3                  8.25   1.0070    -0.4%  0.7424  1.47e-02 0.99991
+MXFP8 e5m2                  8.25   1.0379    +2.6%  0.7829  3.06e-02 0.99960
+MXFP6 e3m2                  6.25   1.0373    +2.6%  0.7826  3.06e-02 0.99960
+MXFP6 e2m3                  6.25   1.1257   +11.3%  0.8436  2.26e-02 0.99979
+MXFP4 e2m1                  4.25   1.2213   +20.7%  0.9679  1.01e-01 0.99607
+NVFP4 (e2m1/e4m3 blk16)      4.5   1.3431   +32.8%  1.0411  6.98e-02 0.99812
+int8 per-channel               8   1.0096    -0.2%  0.7619  9.76e-03 0.99996
+int8 group-32               8.25   1.0117    +0.0%  0.7528  6.04e-03 0.99999
+int6 group-32               6.25   1.0739    +6.2%  0.8032  2.43e-02 0.99975
+int4 per-channel               4   1.7138   +69.4%  1.3640  2.13e-01 0.98463
+int4 group-32               4.25   1.2952   +28.1%  0.9952  1.15e-01 0.99476
+int3 group-32               3.25   2.5814  +155.2%  1.9580  4.08e-01 0.96915
+int2 group-32               2.25  39.9149 +3846.3% 25.8799  5.33e+00 0.87332
+ternary group-32             1.6   2.0028   +98.0%  1.5103  6.71e-01 0.92242
+int1 binary group-32        1.25  22.0863 +2083.6%  8.5513  5.97e+00 0.83536
+
+--- which matrix is sensitive? (quantize ONE to MXFP4, rest fp32) ---
+quantized                   bits     RMSE    dRMSE     MAE    rel L2     cos
+W_i only (1x applied)       4.25   1.2065   +19.3%  0.9473  7.48e-02 0.99786
+W_h only (5x applied)       4.25   1.0405    +2.9%  0.7724  2.97e-02 0.99965
+W_o only (1x applied)       4.25   1.0145    +0.3%  0.7618  5.59e-02 0.99862
+
+--- mixed: W_h protected at 8 bits, W_i/W_o pushed low ---
+config                      bits     RMSE    dRMSE     MAE    rel L2     cos
+W_h MXFP8, W_i/W_o MXFP4     5.0   1.1634   +15.0%  0.9262  9.79e-02 0.99639
+W_h MXFP6, W_i/W_o MXFP4     4.6   1.1606   +14.7%  0.9407  9.87e-02 0.99622
+W_h int4 g32, W_i/W_o MXFP8   4.5   1.1573   +14.4%  0.8703  4.38e-02 0.99933
+
+--- CACHE/ACTIVATION quantization (weights fp32; error enters once) ---
+format                      bits     RMSE    dRMSE     MAE    rel L2     cos
+fp16 cache                    16   1.0113    -0.0%  0.7532  2.07e-04 1.00000
+bf16 cache                    16   1.0119    +0.0%  0.7545  1.66e-03 1.00000
+MXFP8 e4m3 cache            8.25   1.0320    +2.0%  0.7747  2.68e-02 0.99964
+MXFP6 e3m2 cache            6.25   1.0451    +3.3%  0.8082  5.40e-02 0.99855
+MXFP4 e2m1 cache            4.25   1.7741   +75.4%  1.4076  1.20e-01 0.99274
+NVFP4 cache                  4.5   1.3410   +32.6%  1.0504  9.16e-02 0.99581
+int8 per-row cache             8   1.0177    +0.6%  0.7654  1.31e-02 0.99991
+int4 per-row cache             4   3.7475  +270.5%  3.0198  2.53e-01 0.96911
+int4 group-32 cache         4.25   1.9458   +92.4%  1.5965  1.16e-01 0.99324
+int2 group-32 cache         2.25   4.2142  +316.6%  3.4289  6.94e-01 0.76797
+
+--- CORRECTED mixed precision: protect W_i (it re-enters as a residual every layer) ---
+config                              bits     RMSE    dRMSE     MAE      cos
+all MXFP4 (from above)              4.25   1.2213   +20.7%  0.9679  0.99607
+W_i MXFP8, W_h/W_o MXFP4             4.3   1.0336    +2.2%  0.7869  0.99826
+W_i bf16,  W_h/W_o MXFP4             4.3   1.0381    +2.6%  0.7870  0.99828
+W_i bf16,  W_h/W_o int4 g32          4.3   1.3005   +28.6%  1.0079  0.99760
+W_i MXFP8, W_h/W_o MXFP6             6.3   1.0081    -0.3%  0.7830  0.99974
+W_i+W_o MXFP8, W_h MXFP4             4.4   1.0481    +3.6%  0.7813  0.99959
+
+--- ENVIRONMENT cache quantization: quantize per-edge H at EVERY layer ---
+    (this is the cache from the analog-series design, not the final embedding)
+cache format                        bits     RMSE    dRMSE     MAE      cos
+fp16                                  16   1.0115    +0.0%  0.7532  1.00000
+bf16                                  16   1.0116    +0.0%  0.7529  1.00000
+MXFP8 e4m3                          8.25   1.0045    -0.7%  0.7504  0.99998
+int8 per-row                           8   1.0122    +0.1%  0.7535  1.00000
+int8 group-32                       8.25   1.0115    +0.0%  0.7531  1.00000
+MXFP6 e3m2                          6.25   1.0097    -0.2%  0.7550  0.99986
+int6 group-32                       6.25   1.0089    -0.3%  0.7511  1.00000
+MXFP4 e2m1                          4.25   1.0627    +5.1%  0.7825  0.99831
+int4 group-32                       4.25   1.0281    +1.7%  0.7637  0.99998
+int2 group-32                       2.25   1.1406   +12.8%  0.8640  0.99923
+
+  memory for a 1M-entry environment cache @ d_h=2048:
+    fp32      7.63 GiB
+    fp16      3.81 GiB
+    int8      1.97 GiB
+    MXFP6     1.49 GiB
+    int4      1.01 GiB

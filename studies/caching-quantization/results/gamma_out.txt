@@ -1,0 +1,3 @@
+ESOL, 5-fold scaffold-grouped CV, d_h=300, 200 full-batch Adam steps, 3 seeds
+
+gamma (reverse-edge coeff)            depth     RMSE  seed sd  final gamma

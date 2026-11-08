@@ -1,0 +1,5 @@
+# Derived encoder embeddings — regenerable via scripts/prep.py, ~134 MB
+cache/
+*.npy
+*.pkl
+__pycache__/

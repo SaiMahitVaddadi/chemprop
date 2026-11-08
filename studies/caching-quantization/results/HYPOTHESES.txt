@@ -1,0 +1,216 @@
+====================================================================================================
+NOISE FLOOR (fp32 baseline only)
+====================================================================================================
+         metric  fp32_random  sd_random  cv_random_pct  fp32_scaffold  sd_scaffold
+dataset                                                                           
+bace_reg    reg       0.7336     0.0219         2.9845         0.7867       0.0622
+esol        reg       0.6473     0.0257         3.9667         0.9061       0.1142
+freesolv    reg       1.1435     0.0812         7.0987         1.9909       0.4989
+lipo        reg       0.8244     0.0586         7.1044         0.7706       0.0566
+qm9         reg       6.8141     0.8270        12.1371        17.9489       4.3495
+
+median fp32 random-split CV = 7.10%  (range 2.98-12.14%)
+median paired-delta SE per dataset (the real resolution limit, in %):
+dataset
+bace_reg    2.023
+esol        1.074
+freesolv    1.153
+lipo        1.137
+qm9         2.274
+
+=> a paired delta below about 2.31% (2*median SE) is NOT distinguishable from split noise.
+
+====================================================================================================
+HYPOTHESIS 1: 8-bit weights are free (prior: MXFP8-e4m3 -0.4%, int8-g32 +0.0% on ESOL)
+====================================================================================================
+  bf16                   mean +0.00%  median +0.00%  range [-0.03, +0.02]  |snr| med 0.00  resolved-worse 0/5
+  fp16                   mean +0.00%  median +0.00%  range [-0.00, +0.00]  |snr| med 0.00  resolved-worse 1/5
+  MXFP8-e4m3             mean +0.50%  median +0.47%  range [-0.10, +1.13]  |snr| med 0.07  resolved-worse 1/5
+  MXFP8-e4m3-spec448     mean +0.71%  median +0.70%  range [-0.02, +1.42]  |snr| med 0.11  resolved-worse 2/5
+  MXFP8-e5m2             mean +8.65%  median +4.91%  range [+0.66, +21.95]  |snr| med 1.23  resolved-worse 4/5
+  int8-perchan           mean +0.47%  median +0.14%  range [-0.41, +2.20]  |snr| med 0.05  resolved-worse 1/5
+  int8-g32               mean +0.61%  median +0.25%  range [-0.04, +2.29]  |snr| med 0.06  resolved-worse 1/5
+
+  per-dataset detail (paired %delta):
+dataset       bace_reg  esol  freesolv   lipo   qm9
+config                                             
+MXFP8-e4m3        0.20 -0.10      0.47   1.13  0.79
+MXFP8-e5m2       21.95  4.08      0.66  11.65  4.91
+int8-g32          0.34  0.20     -0.04   2.29  0.25
+int8-perchan      2.20  0.14      0.04   0.38 -0.41
+
+====================================================================================================
+HYPOTHESIS 2: 6-bit marginal, 4-bit breaks, <=2-bit dead
+====================================================================================================
+  MXFP6-e3m2             mean +8.80%  median +4.83%  range [+0.65, +22.31]  |snr| med 1.27  resolved-worse 4/5
+  MXFP6-e2m3             mean +1.95%  median +1.24%  range [-0.70, +5.86]  |snr| med 0.28  resolved-worse 3/5
+  int6-g32               mean +2.25%  median +1.25%  range [+0.17, +7.26]  |snr| med 0.15  resolved-worse 2/5
+  int6-perchan           mean +5.18%  median +4.43%  range [+2.69, +10.41]  |snr| med 0.70  resolved-worse 5/5
+  MXFP4-e2m1             mean +38.53%  median +23.37%  range [+16.05, +104.26]  |snr| med 6.75  resolved-worse 5/5
+  NVFP4                  mean +27.41%  median +16.41%  range [+9.54, +51.13]  |snr| med 4.84  resolved-worse 5/5
+  int4-g32               mean +46.97%  median +35.10%  range [+18.59, +121.66]  |snr| med 6.52  resolved-worse 5/5
+  int4-perchan           mean +114.86%  median +87.22%  range [+60.57, +228.17]  |snr| med 16.39  resolved-worse 5/5
+  int3-g32               mean +246.33%  median +168.25%  range [+98.17, +472.56]  |snr| med 46.33  resolved-worse 5/5
+  int2-g32               mean +3037.57%  median +2631.44%  range [+1214.26, +5005.05]  |snr| med 539.63  resolved-worse 5/5
+  ternary-g32            mean +263.07%  median +280.64%  range [+175.12, +320.00]  |snr| med 47.97  resolved-worse 5/5
+  int1-g32               mean +1865.36%  median +1134.96%  range [+535.59, +4909.84]  |snr| med 221.47  resolved-worse 5/5
+
+  is <=2-bit really 'zero signal'? compare to predicting the train mean.
+  R2 of the fp32 and the 2-bit encoders on the regression datasets:
+config     fp32  int1-g32  int2-g32  int3-g32  ternary-g32
+dataset                                                   
+bace_reg  0.664  -884.544  -267.035    -1.756       -2.988
+esol      0.846   -26.978   -60.690     0.450       -0.009
+freesolv  0.809    -5.886   -27.750    -0.131       -1.316
+lipo      0.536  -155.162 -1232.881    -8.107       -7.586
+qm9       0.739   -13.117  -255.603    -1.511       -1.226
+  (R2 <= 0 means no better than the train mean, i.e. genuinely zero signal)
+
+====================================================================================================
+HYPOTHESIS 3: Sensitivity is INVERTED: W_i (2% of params, applied once) dominates
+====================================================================================================
+  only-Wi@MXFP4          mean +16.19%  median +17.05%  range [+11.51, +20.62]  |snr| med 2.78  resolved-worse 5/5
+  only-Wh@MXFP4          mean +4.26%  median +4.38%  range [+2.45, +5.74]  |snr| med 0.67  resolved-worse 5/5
+  only-Wo@MXFP4          mean +13.95%  median +2.90%  range [+2.32, +56.54]  |snr| med 0.68  resolved-worse 5/5
+  only-Wi@int4g32        mean +36.66%  median +21.06%  range [+14.06, +104.88]  |snr| med 5.73  resolved-worse 5/5
+  only-Wh@int4g32        mean +12.15%  median +10.04%  range [+1.37, +30.16]  |snr| med 1.45  resolved-worse 4/5
+  only-Wo@int4g32        mean +10.60%  median +5.27%  range [+2.22, +22.33]  |snr| med 1.52  resolved-worse 4/5
+  only-Wi@int2g32        mean +569.36%  median +432.30%  range [+238.74, +975.54]  |snr| med 101.95  resolved-worse 5/5
+  only-Wh@int2g32        mean +183.42%  median +131.92%  range [+85.56, +322.91]  |snr| med 28.33  resolved-worse 5/5
+  only-Wo@int2g32        mean +104.64%  median +85.96%  range [+76.90, +182.45]  |snr| med 21.59  resolved-worse 5/5
+
+  per-dataset ranking of the three matrices at MXFP4 (which matrix hurts most?):
+config    only-Wh@MXFP4  only-Wi@MXFP4  only-Wo@MXFP4 worst_matrix
+dataset                                                           
+bace_reg           5.74          19.65           2.32           Wi
+esol               2.45          17.05           2.73           Wi
+freesolv           3.77          12.11           2.90           Wi
+lipo               4.97          20.62          56.54           Wo
+qm9                4.38          11.51           5.25           Wi
+
+  W_i is the worst matrix on 4/5 datasets; W_o on 1; W_h on 0
+  W_i/W_h damage ratio: median 3.4x  (prior ESOL claim: 19.3/2.9 = 6.7x)
+
+  [depth study results not yet available]
+
+====================================================================================================
+HYPOTHESIS 4: Protecting W_i is nearly free and ~10x effective
+====================================================================================================
+  MXFP4-e2m1             mean +38.53%  median +23.37%  range [+16.05, +104.26]  |snr| med 6.75  resolved-worse 5/5
+  Wi@MXFP8_rest@MXFP4    mean +17.70%  median +7.11%  range [+5.53, +61.25]  |snr| med 1.48  resolved-worse 5/5
+  Wi@bf16_rest@MXFP4     mean +17.68%  median +6.93%  range [+5.22, +62.32]  |snr| med 1.39  resolved-worse 5/5
+  Wi@MXFP8_rest@MXFP6    mean +3.80%  median +2.21%  range [-0.03, +12.06]  |snr| med 0.30  resolved-worse 4/5
+  Wi@MXFP8_rest@int4g32  mean +13.27%  median +15.04%  range [+2.43, +21.31]  |snr| med 2.03  resolved-worse 5/5
+  Wi@MXFP8_rest@int3g32  mean +122.86%  median +72.05%  range [+25.66, +263.06]  |snr| med 13.95  resolved-worse 5/5
+  Wi@MXFP8_rest@int2g32  mean +197.20%  median +183.01%  range [+171.33, +242.54]  |snr| med 39.94  resolved-worse 5/5
+  Wi+Wo@MXFP8_Wh@MXFP4   mean +4.65%  median +4.61%  range [+2.64, +6.82]  |snr| med 0.65  resolved-worse 5/5
+  Wh@MXFP8_rest@MXFP4    mean +32.66%  median +20.68%  range [+12.43, +93.27]  |snr| med 5.99  resolved-worse 5/5
+  Wh@MXFP6_rest@MXFP4    mean +37.46%  median +21.52%  range [+12.83, +115.01]  |snr| med 6.95  resolved-worse 5/5
+  int4-g32               mean +46.97%  median +35.10%  range [+18.59, +121.66]  |snr| med 6.52  resolved-worse 5/5
+
+  reduction factor (all-MXFP4 -> W_i protected), per dataset:
+dataset
+bace_reg    3.8
+esol        4.2
+freesolv    2.5
+lipo        1.7
+qm9         2.6
+  median reduction = 2.6x   (helps on 5/5 datasets)
+
+====================================================================================================
+HYPOTHESIS 5: Format should match distribution: MX float wins for weights, int for activations
+====================================================================================================
+  comparison                                       MX      int   int better on
+  WEIGHTS 8b  MXFP8-e4m3 vs int8-g32            0.50%    0.61%          2/5
+  WEIGHTS 6b  MXFP6-e3m2 vs int6-g32            8.80%    2.25%          5/5
+  WEIGHTS 4b  MXFP4-e2m1 vs int4-g32           38.53%   46.97%          2/5
+  CACHE   8b  MXFP8 vs int8-g32                 0.21%    0.00%          4/5
+  CACHE   6b  MXFP6 vs int6-g32                 2.41%    0.06%          5/5
+  CACHE   4b  MXFP4 vs int4-g32                37.27%    0.25%          5/5
+
+====================================================================================================
+HYPOTHESIS 6: NVFP4 underperforms plain MXFP4 (prior: +32.8% vs +20.7%)
+====================================================================================================
+           MXFP4  NVFP4  NVFP4-MXFP4
+dataset                             
+bace_reg   30.44  16.41       -14.03
+esol       23.37   9.54       -13.84
+freesolv   16.05  13.45        -2.61
+lipo      104.26  46.54       -57.72
+qm9        18.54  51.13        32.59
+
+  NVFP4 worse than MXFP4 on 1/5 datasets (weights); mean MXFP4 +38.53% vs NVFP4 +27.41%
+  cache: MXFP4 +37.27% vs NVFP4 +0.74%  (NVFP4 worse on 0/5)
+  weight-space relL2: MXFP4 0.0960 vs NVFP4 0.0674 (embedding-space)
+
+====================================================================================================
+HYPOTHESIS 7: The environment cache quantizes far better than the weights
+====================================================================================================
+  cache-fp16             mean +0.00%  median +0.00%  range [-0.00, +0.00]  |snr| med 0.00  resolved-worse 1/5
+  cache-bf16             mean -0.00%  median -0.02%  range [-0.06, +0.06]  |snr| med 0.01  resolved-worse 0/5
+  cache-MXFP8-e4m3       mean +0.21%  median +0.23%  range [-0.14, +0.44]  |snr| med 0.05  resolved-worse 2/5
+  cache-int8-perrow      mean -0.08%  median -0.06%  range [-0.25, -0.00]  |snr| med 0.02  resolved-worse 0/5
+  cache-int8-g32         mean +0.00%  median -0.00%  range [-0.01, +0.03]  |snr| med 0.00  resolved-worse 0/5
+  cache-MXFP6-e3m2       mean +2.41%  median +0.66%  range [+0.06, +9.25]  |snr| med 0.15  resolved-worse 2/5
+  cache-int6-g32         mean +0.06%  median +0.03%  range [-0.11, +0.32]  |snr| med 0.01  resolved-worse 2/5
+  cache-MXFP4-e2m1       mean +37.27%  median +11.54%  range [+9.03, +106.06]  |snr| med 2.36  resolved-worse 5/5
+  cache-NVFP4            mean +0.74%  median +0.43%  range [+0.12, +1.81]  |snr| med 0.13  resolved-worse 3/5
+  cache-int4-perrow      mean +5.53%  median +5.22%  range [+2.76, +10.69]  |snr| med 0.84  resolved-worse 5/5
+  cache-int4-g32         mean +0.25%  median +0.22%  range [+0.14, +0.39]  |snr| med 0.04  resolved-worse 1/5
+  cache-int2-g32         mean +13.55%  median +8.75%  range [+5.74, +30.37]  |snr| med 1.62  resolved-worse 5/5
+
+  CACHE vs WEIGHTS at matched bit width (the actual claim):
+  bits                         weights                       cache     ratio
+  8b int                        0.61%                      0.00%     234.7x
+  6b int                        2.25%                      0.06%      37.0x
+  4b int                       46.97%                      0.25%     186.5x
+  4b MX                        38.53%                     37.27%       1.0x
+  2b int                     3037.57%                     13.55%     224.2x
+
+====================================================================================================
+HYPOTHESIS 8: Cosine similarity is a useless diagnostic
+====================================================================================================
+  Spearman(cos, damage)   over 95 (dataset,config) weight points: -0.938
+  Spearman(relL2, damage) over the same points:                    +0.941
+  Pearson(cos, log10(1+damage)):                                   -0.804
+
+  worked counter-examples (mean over datasets):
+                   cos   relL2      d_pct
+config                                   
+cache-int4-g32  1.0000  0.0064     0.2519
+only-Wh@MXFP4   0.9996  0.0306     4.2642
+only-Wo@MXFP4   0.9987  0.0547    13.9483
+MXFP4-e2m1      0.9965  0.0960    38.5338
+ternary-g32     0.9197  0.6762   263.0661
+int2-g32        0.8790  5.7291  3037.5705
+int1-g32        0.8469  3.5354  1865.3594
+
+  Pairs with the SAME cosine but very different damage show cos cannot rank:
+   only-Wh@MXFP4      cos=0.99962 damage=   +4.26%
+   only-Wo@MXFP4      cos=0.99870 damage=  +13.95%
+   ternary-g32        cos=0.91965 damage= +263.07%
+   int2-g32           cos=0.87904 damage=+3037.57%
+
+====================================================================================================
+DEPLOYMENT CANDIDATES ranked by (bits, measured damage)
+====================================================================================================
+             config  bits  mean_pct  med_pct  worst_pct  snr_med  n_res  n
+      only-Wo@MXFP4  4.25    13.948    2.900     56.540    0.680      5  5
+     cache-int4-g32  4.25     0.252    0.221      0.394    0.039      1  5
+        cache-NVFP4  4.50     0.736    0.427      1.814    0.131      3  5
+           int6-g32  6.25     2.247    1.251      7.260    0.150      2  5
+     cache-int6-g32  6.25     0.061    0.027      0.317    0.013      3  5
+         MXFP6-e2m3  6.25     1.950    1.240      5.855    0.280      3  5
+   cache-MXFP6-e3m2  6.25     2.414    0.664      9.253    0.154      2  5
+Wi@MXFP8_rest@MXFP6  6.29     3.796    2.207     12.061    0.297      4  5
+       int8-perchan  8.00     0.469    0.139      2.205    0.049      1  5
+  cache-int8-perrow  8.00    -0.080   -0.056     -0.001    0.018      3  5
+   cache-MXFP8-e4m3  8.25     0.215    0.232      0.436    0.050      2  5
+ MXFP8-e4m3-spec448  8.25     0.705    0.701      1.419    0.105      2  5
+     cache-int8-g32  8.25     0.003   -0.001      0.028    0.000      0  5
+         MXFP8-e4m3  8.25     0.497    0.466      1.134    0.069      1  5
+           int8-g32  8.25     0.609    0.252      2.293    0.056      1  5
+               bf16 16.00     0.001    0.005      0.023    0.001      0  5
+         cache-bf16 16.00    -0.005   -0.020      0.061    0.007      3  5
+               fp16 16.00     0.000    0.000      0.004    0.000      1  5
+         cache-fp16 16.00     0.000    0.001      0.004    0.000      1  5
