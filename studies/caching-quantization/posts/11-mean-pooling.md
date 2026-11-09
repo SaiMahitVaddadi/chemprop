@@ -63,8 +63,77 @@ Solubility and most ADMET endpoints sit awkwardly in between, which is presumabl
 the default — it's the safer choice when you don't know. But "safer" here means systematically
 discarding size, and the probe says the encoder *computed* size and the readout *threw it away*.
 
-`NormAggregation` (divide by a fixed constant rather than by *n*) is the obvious compromise and is
-already implemented. It preserves the extensive scaling while keeping activations bounded.
+`NormAggregation` is the obvious compromise and is already implemented. Worth being exact about
+what it does, because the word "norm" means three incompatible things across codebases:
+
+```python
+class NormAggregation(SumAggregation):
+    def forward(self, H, batch):
+        return super().forward(H, batch) / self.norm     # norm = 100.0 by default
+```
+
+It divides the **sum** by a *constant*. So it preserves extensive scaling exactly — it is sum
+aggregation with the units changed, and the constant is tunable (`--aggregation-norm`, searched
+over 1–200 in hpopt). Compare:
+
+| aggregation | formula | extensive info |
+|---|---|---|
+| `sum` | Σ h_v | preserved |
+| **chemprop `norm`** | **Σ h_v / c** | **preserved (rescaled)** |
+| `mean` | Σ h_v / n | **destroyed** |
+| L2 row-normalisation | h / ‖h‖₂ | destroyed, and magnitude too |
+
+That last row matters because several graph libraries call it "norm aggregation." It is the most
+aggressively intensive option of the four, not a compromise. "We used norm aggregation" does not
+identify an experiment.
+
+## The principled fix already exists, and it isn't a binary choice
+
+I posed this as extensive-vs-intensive, pick one. That framing is too coarse, and the better answer
+is in the **PNA** family (Corso et al., NeurIPS 2020): don't choose an aggregator, use several, and
+attach a **degree scaler**
+
+```
+S(d, α) = (log(d+1) / δ)^α
+```
+
+with α ∈ {−1, 0, +1} giving attenuation, identity and amplification. **α = 0 is mean, α = +1 is
+extensive, α = −1 attenuates** — so the mean/sum decision becomes a selectable (or learnable)
+exponent rather than a fork in the road. If you're building this, that's the thing to build.
+
+PNA's other half is multiple aggregators in parallel — mean, max, min, std, var, and higher
+**moments (3rd, 4th, 5th)**. This is the part I think is genuinely underexplored for molecules,
+because mean and sum both collapse the per-atom distribution to its first moment. Neither can
+distinguish *a molecule with a few very unusual atoms* from *a molecule of uniformly ordinary
+atoms* — the variance and skew of the per-atom embedding carry exactly that heterogeneity, and both
+default readouts throw it away. The probe suite above would test it directly: does variance
+aggregation decode anything mean and sum cannot?
+
+A wider aggregation design space than Chemprop's four is worth knowing about, and a reference
+implementation of most of it exists in [EGAT](https://github.com/SaiMahitVaddadi/EGAT-Private/tree/v2)
+(`src/models/aggregators/`): PNA with moments 3–5, weighted sum/mean, attentive variants that
+return a global **edge** feature alongside the node one, bond- and edge-level pooling, learned
+hierarchical pooling (DiffPool, SAGPool, cluster pooling), and a path-integral pooling layer with
+learned per-walk-length weights.
+
+Two of those deserve calling out. **Edge-level readout** is a real structural difference:
+Chemprop scatters its final edge states to atoms and then discards them, even though the edge
+states are the thing message passing actually computes — and Part 2 measured atom-level
+environments caching far worse (12–54%) than edge-level ones, so there's an efficiency argument on
+the same side. And **path-integral pooling with learned weights over walk lengths** is a learned
+generating function over powers of the walk operator, which is the same object as the Ihara zeta
+function from Part 7 — a learned Ihara-style readout over the non-backtracking operator is an
+interesting thing nobody appears to have built.
+
+One convenient fact about all of this: **aggregation is downstream of the cache.** The environment
+cache from Part 2 stores per-edge hidden states, and readout happens afterwards, so you can change
+aggregation freely without touching any of the caching work. The exception is learned hierarchical
+pooling (DiffPool, SAGPool), which assigns clusters globally and therefore breaks the
+locality rule from Part 3 — those interact with the cache, the rest don't.
+
+I'd temper expectations on the hierarchical-pooling family specifically: their record on molecular
+property prediction is mixed, they add learned-assignment cost, and the evidence from Part 8 is
+that molecular graphs don't suffer the bottlenecks that motivate them.
 
 There's also a direct tie to Part 6's depth result. Truncating CheMeleon from depth 6 to depth 3
 costs 15–30% RMSE, and probing says a large part of what's lost is heavy-atom count and molecular
