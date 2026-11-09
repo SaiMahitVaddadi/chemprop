@@ -172,6 +172,203 @@ class BondAggregation(nn.Module):
         raise AssertionError(m)
 
 
+class EnvironmentAggregation(nn.Module):
+    r"""Two-level readout: pool to per-node ENVIRONMENTS first, then to the molecule.
+
+    Mirrors the EGAT `AggregatorFunctions` design (h_env / f_env):
+
+      h_env_v = AGG_{u in N(v)} h_u          node features over v's neighbourhood
+      f_env_v = AGG_{e incident to v} e_e    edge features over v's incident bonds
+      z       = GLOBAL(h_env) , GLOBAL(f_env)
+      out     = MIX(z_node, z_edge)          concat | linear | bilinear
+
+    Two properties make this the odd one out among readouts:
+
+    1. `f_env` keeps bond information at NODE granularity -- a middle path between
+       Chemprop (scatter edges into atoms, then discard) and a global bond pool.
+    2. It operates at a chosen RADIUS, which is the same granularity the environment
+       cache is keyed on. Every other readout sits downstream of the cache and is
+       therefore free; an environment readout is cacheable IN THE SAME TABLE, so a
+       cache hit delivers the readout too. Measured hit rate by radius (pooled, 11
+       datasets): r=0 99.9%, r=1 97.2%, r=2 87.9%, r=3 77.1%, r=4 67.9%, r=5 60.6%.
+       So readout radius is a cache-budget knob with a known price.
+
+    `self_include=True` adds h_v back to its own environment (EGAT's
+    `h_env += x`), which is the same source-reinjection structure as Chemprop's
+    `H_0 + W_h M` -- see experiments/residual_flow.py.
+    """
+
+    MODES = ("sum", "mean", "max", "min", "std", "norm", "l2row", "attention")
+    MIXES = ("concat", "linear", "bilinear")
+
+    def __init__(self, mode: str, d_node: int, d_edge: int, mix: str = "concat",
+                 global_mode: str = "sum", self_include: bool = True,
+                 norm_const: float = 100.0):
+        super().__init__()
+        if mode not in self.MODES or mix not in self.MIXES:
+            raise ValueError(f"mode {mode!r} / mix {mix!r}")
+        self.mode, self.mix, self.global_mode = mode, mix, global_mode
+        self.self_include, self.norm_const = self_include, norm_const
+        self.d_node, self.d_edge = d_node, d_edge
+        if mode == "attention":
+            self.score_n = nn.Linear(d_node, 1)
+            self.score_e = nn.Linear(d_edge, 1)
+        if mix == "linear":
+            self.mixer = nn.Linear(d_node + d_edge, d_node + d_edge)
+        elif mix == "bilinear":
+            # captures multiplicative node x edge interactions that concat+linear cannot
+            self.mixer = nn.Bilinear(d_node, d_edge, d_node + d_edge)
+
+    @property
+    def out_dim(self) -> int:
+        return self.d_node + self.d_edge
+
+    def _pool(self, X, idx, n, score=None):
+        m = self.mode
+        if m == "sum":
+            return _seg_sum(X, idx, n)
+        if m == "mean":
+            return _seg_sum(X, idx, n) / _seg_count(idx, n, X.dtype, X.device)
+        if m == "max":
+            return _seg_max(X, idx, n)
+        if m == "min":
+            return _seg_min(X, idx, n)
+        if m == "std":
+            return (_seg_moment(X, idx, n, 2) + EPS).sqrt()
+        if m == "norm":
+            return _seg_sum(X, idx, n) / self.norm_const
+        if m == "l2row":
+            t = _seg_sum(X, idx, n)
+            return t / t.norm(dim=1, keepdim=True).clamp(min=EPS)
+        if m == "attention":
+            sc = score(X)
+            mx = _seg_max(sc, idx, n).index_select(0, idx)   # max-subtracted, unlike
+            w = (sc - mx).exp()                              # EGAT's and chemprop's .exp()
+            return _seg_sum(w * X, idx, n) / _seg_sum(w, idx, n).clamp(min=EPS)
+        raise AssertionError(m)
+
+    def forward(self, H_v, H_e, ei, a_batch, e_batch, n_mol):
+        n_v = H_v.shape[0]
+        # h_env: neighbour node features into each node (via inbound edges)
+        h_env = self._pool(H_v.index_select(0, ei[0]), ei[1], n_v,
+                           getattr(self, "score_n", None))
+        if self.self_include:
+            h_env = h_env + H_v
+        # f_env: incident edge features into each node -- the bond info chemprop drops
+        f_env = self._pool(H_e, ei[1], n_v, getattr(self, "score_e", None))
+        g = (lambda X: _seg_sum(X, a_batch, n_mol)) if self.global_mode == "sum" else (
+            lambda X: _seg_sum(X, a_batch, n_mol)
+            / _seg_count(a_batch, n_mol, X.dtype, X.device))
+        zn, ze = g(h_env), g(f_env)
+        if self.mix == "concat":
+            return torch.cat([zn, ze], dim=1)
+        if self.mix == "linear":
+            return self.mixer(torch.cat([zn, ze], dim=1))
+        return self.mixer(zn, ze)
+
+
+class BidirectionalEnvironment(nn.Module):
+    r"""Pool the forward flow and the reverse flow separately, then combine.
+
+    Chemprop keeps only the INBOUND half: M_v = sum_{f: dest(f)=v} H_f. But H_{u->v}
+    and H_{v->u} are different vectors, so each atom has two distinct aggregates:
+
+        in_v  = AGG_{e: dest(e)=v} H_e      messages arriving at v
+        out_v = AGG_{e: src(e)=v}  H_e      messages leaving v
+
+    combine:
+      concat   [in, out]              keeps both, 2x width
+      sum      in + out               symmetric, direction-blind
+      diff     in - out               the DIVERGENCE of the message flow at v
+      bilinear B(in, out)             multiplicative interaction
+
+    `diff` is the interesting one. In the flow reading of the update from
+    experiments/residual_flow.py -- advection-diffusion with a source term -- in_v - out_v
+    is the net flux at v, i.e. the discrete divergence of the message field. A node where
+    it is large is a source or a sink of representation. Chemprop cannot express it,
+    because it only ever forms `in`.
+    """
+
+    COMBINES = ("concat", "sum", "diff", "bilinear")
+
+    def __init__(self, d_h: int, combine: str = "concat", mode: str = "sum"):
+        super().__init__()
+        if combine not in self.COMBINES:
+            raise ValueError(combine)
+        self.combine, self.mode, self.d_h = combine, mode, d_h
+        if combine == "bilinear":
+            self.mixer = nn.Bilinear(d_h, d_h, d_h)
+
+    @property
+    def out_dim(self) -> int:
+        return self.d_h * 2 if self.combine == "concat" else self.d_h
+
+    def flows(self, H_e, ei, n_v):
+        f = _seg_sum if self.mode == "sum" else _seg_max
+        return f(H_e, ei[1], n_v), f(H_e, ei[0], n_v)      # inbound, outbound
+
+    def forward(self, H_e, ei, n_v):
+        i_v, o_v = self.flows(H_e, ei, n_v)
+        if self.combine == "concat":
+            return torch.cat([i_v, o_v], dim=1)
+        if self.combine == "sum":
+            return i_v + o_v
+        if self.combine == "diff":
+            return i_v - o_v
+        return self.mixer(i_v, o_v)
+
+
+def origin_sensitivity(H_e, ei, V, n_v, n_bins: int = 8, seed: int = 0):
+    """Does it matter WHERE a message came from, or only that it arrived?
+
+    Chemprop's atom sum is origin-blind: sum_e H_e discards which neighbour sent each
+    message. Three measurements, no training required:
+
+      divergence_ratio   ||in - out|| / ||in + out||, per atom. How much of the flow at
+                         an atom is directional. Chemprop forms only `in`, so a large
+                         value means it is discarding a real asymmetry.
+      origin_tag_gain    participation ratio of origin-TAGGED pooling (separate bucket
+                         per source-atom bin, concatenated) minus that of the blind sum.
+                         Positive means origin carried information the sum collapsed.
+      shuffle_delta      relative change in the atom sums under a GLOBAL permutation of
+                         the edge->atom assignment (not degree-preserving: atoms change
+                         degree too, so this is an upper bound on the origin effect).
+                         If origin were irrelevant, reassigning which message landed
+                         where would barely move the aggregate.
+    """
+    g = torch.Generator().manual_seed(seed)
+    inb = _seg_sum(H_e, ei[1], n_v)
+    outb = _seg_sum(H_e, ei[0], n_v)
+    div = ((inb - outb).norm(dim=1) / (inb + outb).norm(dim=1).clamp(min=EPS))
+
+    def pr(X):
+        sv = torch.linalg.svdvals(X.float() - X.float().mean(0, keepdim=True))
+        return float((sv.sum() ** 2) / (sv.pow(2).sum() + EPS))
+
+    # origin tag = coarse bin of the source atom's feature vector
+    src_key = (V.index_select(0, ei[0]) @ torch.randn(V.shape[1], 1, generator=g)).squeeze(1)
+    bins = torch.bucketize(src_key, src_key.quantile(
+        torch.linspace(0, 1, n_bins + 1)[1:-1]))
+    tagged = torch.cat([_seg_sum(H_e * (bins == b).to(H_e.dtype).unsqueeze(1), ei[1], n_v)
+                        for b in range(n_bins)], dim=1)
+
+    # degree-preserving shuffle of which edge lands at which atom
+    dst = ei[1]
+    perm = torch.randperm(dst.shape[0], generator=g)
+    shuffled = _seg_sum(H_e, dst[perm], n_v)
+
+    return {
+        "divergence_ratio_mean": float(div.mean()),
+        "divergence_ratio_median": float(div.median()),
+        "divergence_ratio_p90": float(div.quantile(0.9)),
+        "pr_blind_sum": pr(inb),
+        "pr_origin_tagged": pr(tagged),
+        "origin_tag_gain": pr(tagged) - pr(inb),
+        "shuffle_relative_delta": float((shuffled - inb).norm() / inb.norm().clamp(min=EPS)),
+        "n_origin_bins": n_bins,
+    }
+
+
 def atom_vs_bond_readout(V, E, ei, rev, W_i, W_h, depth, a_batch, e_batch, n_mol):
     """Return (H_v atom states, H_e final edge states). Chemprop keeps only the first."""
     H_0 = torch.nn.functional.linear(torch.cat([V[ei[0]], E], 1), W_i)
@@ -233,7 +430,57 @@ def main():
                               "participation_ratio": pr}
         print(f"{mode:12}{agg.out_dim:>9}{float(Z.abs().mean()):>11.4f}{pr:>7.1f}")
 
+    # environment-level readout: radius-1 h_env / f_env, three mixing modes
+    print(f"\n{'env mode':12}{'mix':10}{'out_dim':>9}{'mean |z|':>11}{'rank':>7}")
+    res["env_modes"] = {}
+    for mode in EnvironmentAggregation.MODES:
+        for mix in EnvironmentAggregation.MIXES:
+            agg = EnvironmentAggregation(mode, d_h, d_h, mix=mix)
+            with torch.no_grad():
+                Z = agg(M_v, H_e, ei, a_batch, e_batch, n_mol)
+                sv = torch.linalg.svdvals(Z.float() - Z.float().mean(0, keepdim=True))
+                pr = float((sv.sum() ** 2) / (sv.pow(2).sum() + EPS))
+            res["env_modes"][f"{mode}|{mix}"] = {
+                "out_dim": int(agg.out_dim), "mean_abs": float(Z.abs().mean()),
+                "participation_ratio": pr}
+            if mix == "concat":
+                print(f"{mode:12}{mix:10}{agg.out_dim:>9}{float(Z.abs().mean()):>11.4f}{pr:>7.1f}")
+
+    # bidirectional flow and message origin
+    print(f"\n{'bidirectional':16}{'out_dim':>9}{'mean |z|':>11}{'rank':>7}")
+    res["bidirectional"] = {}
+    for comb in BidirectionalEnvironment.COMBINES:
+        agg = BidirectionalEnvironment(d_h, combine=comb)
+        with torch.no_grad():
+            Z = agg(H_e, ei, n_v)
+            Zm = _seg_sum(Z, a_batch, n_mol)
+            sv = torch.linalg.svdvals(Zm.float() - Zm.float().mean(0, keepdim=True))
+            pr = float((sv.sum() ** 2) / (sv.pow(2).sum() + EPS))
+        res["bidirectional"][comb] = {"out_dim": int(agg.out_dim),
+                                      "mean_abs": float(Zm.abs().mean()),
+                                      "participation_ratio": pr}
+        print(f"{comb:16}{agg.out_dim:>9}{float(Zm.abs().mean()):>11.4f}{pr:>7.1f}")
+
+    with torch.no_grad():
+        res["origin"] = origin_sensitivity(H_e, ei, V, n_v)
+    o = res["origin"]
+    print(f"\nmessage origin:")
+    print(f"  divergence ||in-out||/||in+out||  mean {o['divergence_ratio_mean']:.4f}  "
+          f"median {o['divergence_ratio_median']:.4f}  p90 {o['divergence_ratio_p90']:.4f}")
+    print(f"  participation ratio  blind sum {o['pr_blind_sum']:.1f} -> "
+          f"origin-tagged {o['pr_origin_tagged']:.1f}  (gain {o['origin_tag_gain']:+.1f})")
+    print(f"  degree-blind shuffle moves the atom sums by {o['shuffle_relative_delta']:.3f} "
+          f"(relative)")
+
     res["caveat"] = [
+        "GLOBAL DIVERGENCE IS IDENTICALLY ZERO and that is a theorem, not a measurement "
+        "artifact: every directed edge is counted once inbound (at its destination) and "
+        "once outbound (at its source), so sum_v (in_v - out_v) = sum_e H_e - sum_e H_e = 0. "
+        "The `diff` combine is therefore useless as a MOLECULE-level readout and is only "
+        "meaningful per atom -- relevant to mol_atom_bond.py's atom-level targets.",
+        "shuffle_relative_delta uses a global permutation, so atoms change degree as well "
+        "as origin; it bounds the origin effect from above rather than isolating it. A "
+        "degree-preserving shuffle is the tighter control and is not implemented.",
         "This measures the SHAPE and conditioning of each bond readout, not downstream "
         "accuracy. Pair it with the rep2 probe suite to measure what bond readout decodes "
         "that the atom sum cannot -- that is the number that quantifies the information loss.",

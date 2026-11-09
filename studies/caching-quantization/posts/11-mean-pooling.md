@@ -241,6 +241,102 @@ in this post, run on atom-only versus atom-plus-bond readout: if bond pooling de
 targets — rotatable-bond count, conjugation, aromatic-bond count, ring-bond count — that the atom
 sum cannot, that quantifies the loss instead of arguing it. That experiment is wired up and unrun.
 
+## Environment aggregation, and the one readout that is itself cacheable
+
+The variants above all pool straight to the molecule. An alternative is to pool to **per-atom
+environments** first and then to the molecule — which is what EGAT's `AggregatorFunctions` does
+with two quantities:
+
+```
+h_env_v = AGG over u in N(v) of h_u       neighbour node features
+f_env_v = AGG over e incident to v of e_e  incident bond features
+```
+
+`f_env` is the interesting half: it keeps bond information at **node granularity**, a middle path
+between Chemprop (scatter edges into atoms, discard) and pooling all bonds globally. And the two
+global vectors get combined by a learned `nn.Linear` or `nn.Bilinear`. The bilinear form matters —
+Chemprop concatenates and projects (`W_o([V ‖ M])`), which cannot express multiplicative node×edge
+interactions that a bilinear form can.
+
+But the property that makes this family different from every other readout is about caching.
+Earlier I noted that aggregation sits *downstream* of the environment cache and is therefore a free
+design axis. **Environment aggregation is the exception, and in a good way:** it operates at a
+chosen radius, which is the same granularity the cache is keyed on. So an environment readout is
+cacheable *in the same table* — a cache hit delivers the readout too. And the hit-rate curve gives
+you the price list:
+
+| readout radius | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| cacheable fraction | 99.9% | 97.2% | 87.9% | 77.1% | 67.9% | 60.6% |
+
+Readout radius becomes a cache-budget knob with a known cost. I haven't seen that connection made
+anywhere, and it only exists because the readout and the cache share a key.
+
+## Forward flow, reverse flow, and a conservation law
+
+Chemprop keeps only the **inbound** half of the flow: `M_v = Σ_{f: dest(f)=v} H_f`. Since `H_{u→v}`
+and `H_{v→u}` are different vectors, each atom actually has two distinct aggregates — messages
+arriving and messages leaving — and the obvious thing to do is pool both and combine them:
+concatenate, sum, take the difference, or mix bilinearly.
+
+The difference is the one with an interpretation. In the flow reading of the update from Part 12 —
+advection–diffusion with a source term — `in_v − out_v` is the net flux at atom *v*, the **discrete
+divergence** of the message field. Atoms where it's large are sources or sinks of representation.
+
+Measured, it is **exactly zero**:
+
+| combine | out dim | mean \|z\| | participation ratio |
+|---|---|---|---|
+| concat | 2 d_h | 4.26 | 5.0 |
+| sum | d_h | 8.52 | 5.0 |
+| **diff** | d_h | **0.0000** | **1.4** |
+| bilinear | d_h | 20.77 | 6.2 |
+
+That's not a bug, it's a theorem. Every directed edge is counted exactly once as inbound at its
+destination and exactly once as outbound at its source, so
+
+```
+Σ_v (in_v − out_v) = Σ_e H_e − Σ_e H_e = 0
+```
+
+**Message flow on a molecular graph is conserved, so the global divergence vanishes identically.**
+The divergence theorem, on a closed graph with no boundary. Which means `diff` is useless as a
+molecule-level readout and only meaningful **per atom** — exactly the granularity
+`mol_atom_bond.py` uses for atom-level targets, where it would be a genuinely new feature.
+
+Per atom it is not small. The ratio ‖in − out‖ / ‖in + out‖ has **mean 0.32, median 0.27, and a
+90th percentile of 0.64** — so roughly a third of the flow magnitude at a typical atom is
+directional, and the inbound-only sum discards all of it.
+
+## Does it matter where a message came from?
+
+Chemprop's atom sum is origin-blind: `Σ_e H_e` records that messages arrived, not which neighbour
+sent each one. Two measurements, no training needed:
+
+- **Origin-tagged pooling** — one bucket per coarse bin of the source atom's features, concatenated
+  — raises the participation ratio of the atom-level representation from **43.5 to 62.5 (+18.9)**.
+  Origin was carrying information the blind sum collapsed.
+- **Permuting which edge lands at which atom moves the atom sums by 0.569 relative.** If origin were
+  irrelevant, reassignment would barely move the aggregate.
+
+One honest limit on that second number: my permutation is global, so atoms change *degree* as well
+as origin. It bounds the origin effect from above rather than isolating it; a degree-preserving
+shuffle is the tighter control and isn't implemented.
+
+## Three bugs in the reference implementation
+
+Since the EGAT aggregators are the reference I worked from, three things worth fixing there:
+
+1. **`nodeaggstatement` has `'mean'` twice**, and the second branch (which calls `fn.sum`) is dead.
+   `'sum'` is missing from the node dispatch entirely while present in the edge one — so
+   `node_agg='sum'` raises `NotImplementedError` while `edge_agg='sum'` works.
+2. **`learned_attn` and `calced_attn` call `.exp()` on raw logits with no max-subtraction** — the
+   same overflow hazard as Chemprop's `AttentiveAggregation`. My implementations subtract a
+   per-segment max.
+3. **`weighted_sum_node` and `learned_attn_node` return a global `[d_node]` vector** but are
+   assigned into `g.ndata['h_env']`, which expects `[N, d_node]` — a global aggregator in a
+   per-node slot.
+
 ## Caveats
 
 These are **linear** probes on **frozen** embeddings. A linear probe failing does not show
