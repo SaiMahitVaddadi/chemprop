@@ -186,6 +186,52 @@ three grounds rather than measured down. I think the physics objection is decisi
 needs no experiment; the other two are engineering objections a determined implementation might
 dent. Also unrun: γ at 0.5 and 2.0 at depth 6, and the wider depth sweep.
 
+## There is no starting point to choose
+
+A natural follow-on: if ordering matters, pick a good *starting* atom — the most connected one, the
+centre, a random one — and propagate from there. It's an appealing study and the first result closes
+most of it.
+
+Chemprop's update touches every directed edge simultaneously, `depth` times, with no ordering
+anywhere. The update is equivariant to atom relabelling and the readout is a permutation-invariant
+pool, so the molecule representation **cannot depend on which atom you call first.** Verified by
+permuting the featurized graph directly and re-encoding: max relative difference **3.0e-07**, which
+is float summation order in `index_add_`, not a broken symmetry.
+
+So "where does message passing start" is not a question the architecture admits. It becomes one
+only if you deliberately break invariance, and there are three ways, in increasing invasiveness:
+
+**A. Anchor positional encoding.** Pick an anchor by some rule and add
+shortest-path-distance-from-anchor as an extra atom feature. No architecture change — it rides in
+through `--atom-features-path`. This is the cheap, testable version, and it has a measurable cost
+specific to this project: distance-from-anchor is a **global** feature, so unlike RWSE (provably a
+function of the radius-⌈k/2⌉ ball, Part 8) it is **not environment-cacheable.** Measured over nine
+single-substituent swaps on one scaffold:
+
+| anchor rule | anchor moves | atoms whose feature changed |
+|---|---|---|
+| **max degree** | **0%** | **9.2%** |
+| **centroid (min eccentricity)** | **0%** | **9.2%** |
+| canonical rank 0 | 11% | 17.6% |
+| closeness centre | 22% | 27.5% |
+| periphery | 22% | 26.1% |
+| **random** | **89%** | **84.3%** |
+
+Degree- and centroid-based anchors are stable; random and canonical-rank are not. Note the
+canonical-rank row — this is the same instability that sinks the traversal idea above, showing up in
+a milder form. And even the best rule changes the feature on ~1 atom in 11 per edit, each of which
+is a cache miss. So if you anchor, use max-degree or centroid, and budget for the cache cost.
+
+**B. Anchor ensembling.** Compute *k* rooted representations and pool them, recovering invariance by
+averaging over roots. Costs k× compute. Not implemented.
+
+**C. An asynchronous or priority-ordered schedule** from the anchor. This is the traversal idea
+argued down above, on physics, canonical-rank instability, and batching grounds.
+
+My honest expectation is that A is worth one afternoon and B and C are not, because the measured
+anchor instability and the Hammett objection both point the same way. But A is cheap enough that the
+answer should be measured rather than predicted — the code is in `experiments/anchor_study.py`.
+
 ## Reproducing
 
 ```bash
