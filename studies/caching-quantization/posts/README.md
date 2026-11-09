@@ -1,6 +1,6 @@
 # Series outline
 
-Ten posts, alternating between practitioner-facing and systems-facing register.
+Eleven posts, alternating between practitioner-facing and systems-facing register.
 
 | # | post | track | state |
 |---|---|---|---|
@@ -14,6 +14,7 @@ Ten posts, alternating between practitioner-facing and systems-facing register.
 | 8 | [The one feature that attacks radius](08-rwse-radius.md) | both | complete |
 | 9 | [Chemprop ships eleven uncertainty estimators, and none can see a molecule](09-uncertainty-blind.md) | practitioner | complete |
 | 10 | [Half of FreeSolv shares one "scaffold", and it is the empty string](10-scaffold-split.md) | practitioner | §"not one thing" unverified |
+| 11 | [Mean pooling is why your GNN can't count atoms](11-mean-pooling.md) | both | complete |
 
 ## Narrative arc
 
@@ -49,6 +50,12 @@ architecture investigation mostly validated Chemprop rather than improving it.
   Jaccard numbers (0.012–0.29) come from re-implementations read out of upstream source and are
   NOT verified; `chemprop`, `astartes` and `deepchem` all need installing before that section is
   publishable.
+- **11** — linear probes on frozen embeddings only; a probe failing shows information is not
+  linearly available, not that it is absent. Descriptor baseline uses RDKit's ~200 native 2-D
+  descriptors, not the 1,613 Mordred features CheMeleon was pretrained on, which understates
+  descriptor equivalence. The frozen-CheMeleon-vs-descriptors comparison is already published
+  twice (Praski arXiv:2508.06199; Ben Hicham arXiv:2604.16123); the mean-pooling and depth-
+  decomposition results are not.
 - **8** — RWSE is measured on one dataset from scratch; using it with CheMeleon needs re-pretraining
   because it changes `W_i`'s width.
 

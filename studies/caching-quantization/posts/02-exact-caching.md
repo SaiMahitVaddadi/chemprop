@@ -138,6 +138,26 @@ so the final layer caches far worse than the message-passing layers. And memory 
 real: 0.06–1.38 GiB in fp32 for the depth-1..5 edge states, which Part 5 shows drops to
 0.008–0.183 GiB at int4 for +0.25% RMSE.
 
+I expected to beat that with a low-rank projection, on the reasoning that a 2048-dimensional
+embedding can't be using 2048 dimensions. **That was wrong, and informatively so.** The molecule
+embedding has a participation ratio of 3.30 and puts 51.8% of its variance in a single direction,
+with 90% of variance in 11 directions — but reconstructing from rank *k* and re-running the task
+costs +12.5% at k=64, +5.4% at k=128 and +1.0% at k=256, and some datasets need k=512 to stay
+inside the noise band. **90% of the variance is in 11 directions and none of the signal is there.**
+At matched memory, rank-256 costs +10.9 to +15.5% where int4 group-32 costs +0.09 to +0.54% —
+20–60× worse accuracy per byte, and the low-rank basis was fitted with the test molecules included,
+so it's the optimistic version.
+
+The per-edge hidden states are worse still for this idea: their rank *grows* with depth
+(participation ratio 7.3 at layer 0 to 57.9 at layer 5; n95 from 23 to 708), which is the opposite
+of the rank-collapse story the over-smoothing literature would predict.
+
+What the same measurement did turn up is a better lever: **`H` is 94.6–99.0% exact ReLU zeros**,
+24–112 non-zeros per edge, with only 852–1892 of the 2048 dimensions ever non-zero in a given
+layer. A bitmask-plus-int4 layout storing the zero pattern exactly comes to roughly 144–330 bytes
+per edge against int4's 1088 — a further **3.3–7.6×**. That is a layout estimate with no kernel
+behind it, but sparsity rather than low rank looks like where the remaining memory is.
+
 ## When the cache is valid, and when it is silently wrong
 
 A cached hidden state is only correct for the weights that produced it. Every optimizer step
