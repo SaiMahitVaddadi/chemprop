@@ -1,6 +1,6 @@
 # Series outline
 
-Eight posts, alternating between practitioner-facing and systems-facing register.
+Ten posts, alternating between practitioner-facing and systems-facing register.
 
 | # | post | track | state |
 |---|---|---|---|
@@ -12,6 +12,8 @@ Eight posts, alternating between practitioner-facing and systems-facing register
 | 6 | [The depth experiment that didn't work](06-depth-experiment.md) | both | complete |
 | 7 | [Chemprop is already computing the Hashimoto matrix, in the wrong factorization](07-hashimoto.md) | systems | complete, not recommended |
 | 8 | [The one feature that attacks radius](08-rwse-radius.md) | both | complete |
+| 9 | [Chemprop ships eleven uncertainty estimators, and none can see a molecule](09-uncertainty-blind.md) | practitioner | complete |
+| 10 | [Half of FreeSolv shares one "scaffold", and it is the empty string](10-scaffold-split.md) | practitioner | §"not one thing" unverified |
 
 ## Narrative arc
 
@@ -41,6 +43,12 @@ architecture investigation mostly validated Chemprop rather than improving it.
 - **6** — the truncation and from-scratch results disagree in sign; the decisive experiment
   (re-pretraining CheMeleon at depth 3–4) is unrun.
 - **7** — `torch.compile` on the bucketed kernel is blocked by an Inductor Metal codegen bug.
+- **9** — code claims verified against 2.3.1 directly; the literature claims are cited and several
+  rest on single papers (the SGOOD OOD table in particular is one table in one CIKM paper).
+- **10** — the scaffold statistics are measured with RDKit directly. The cross-implementation
+  Jaccard numbers (0.012–0.29) come from re-implementations read out of upstream source and are
+  NOT verified; `chemprop`, `astartes` and `deepchem` all need installing before that section is
+  publishable.
 - **8** — RWSE is measured on one dataset from scratch; using it with CheMeleon needs re-pretraining
   because it changes `W_i`'s width.
 
