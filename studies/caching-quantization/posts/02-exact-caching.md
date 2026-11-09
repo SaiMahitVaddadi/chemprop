@@ -118,6 +118,21 @@ almost none.
 So the honest headline is **median 2.89× under scaffold shift, 9–11× on congeneric series**, not
 the 7.9× the synthetic benchmark advertised.
 
+And a caveat on that bottom row, which I had been treating as the conservative number. **A
+Bemis-Murcko scaffold split is a much weaker distribution shift than it sounds.** Median
+train-test Tanimoto distance moves only 0.577 → 0.610 going from random to scaffold, against
+0.705–0.714 for UMAP or Lo-Hi clustering splits, and in-distribution/out-of-distribution
+performance correlates at r ≈ 0.9 under scaffold splitting versus r ≈ 0.4 under clustering
+(Fooladi et al., JCIM 2025). The mechanism is that there are only ~1.93 molecules per scaffold on
+average, so as the unique-scaffold-to-molecule ratio approaches 1, scaffold splitting *converges
+to random splitting*. Measured leakage bears it out: 56% of MoleculeNet HIV test molecules have a
+training neighbour at ECFP4 Tanimoto > 0.4 under HIV's own recommended scaffold split, rising to
+96–99% for MUV, QM8 and QM9 (Steshin, NeurIPS 2023 D&B).
+
+So **2.89× is not a worst case** — it is a mild-shift case, and a genuine cluster split would
+likely push it lower. Re-measuring hit rates under UMAP or Butina splits is the obvious follow-up
+and is not done here.
+
 Two further limits. Atom-level environments (the readout's input) hit only **12–54%** at depth 6,
 so the final layer caches far worse than the message-passing layers. And memory is modest but
 real: 0.06–1.38 GiB in fp32 for the depth-1..5 edge states, which Part 5 shows drops to
@@ -142,8 +157,31 @@ from-scratch-training one. Three specifics worth knowing:
 A cache miss at radius *T* means, literally: *this substructure has not appeared in anything I have
 seen.* The fraction of novel environments in a molecule is therefore an applicability-domain
 signal that falls out of the cache for free — no distance metric to calibrate, no separate model,
-no density estimate. I think this is the most underrated consequence of keying on exact
-environments rather than on learned embeddings, and I haven't evaluated it properly yet.
+no density estimate.
+
+I want to flag this as a hypothesis rather than oversell it, because molecular applicability
+domain is a graveyard. GNN **latent-space** distance to the training set has been measured against
+prediction error at Spearman ρ ∈ [−0.08, 0.20] — noise (Parrondo-Pizarro et al., JCIM 2026). A
+vanilla MPNN's distance-awareness AUC is 0.500 ± 0.004, exactly chance (Han et al., NeurIPS 2021
+DistShift). The classic OOD scores are at or *below* chance on molecules: MSP, Energy and ODIN all
+land at 45–57 AUROC on BACE/BBBP/HIV while the same backbone reaches 79–97% in-distribution
+accuracy (SGOOD, CIKM 2024). And there is a theorem that ReLU networks produce almost always
+high-confidence predictions far from the training data (Hein et al., CVPR 2019) — a D-MPNN is a
+ReLU network.
+
+Two reasons I still think it is worth testing. It is an **input-space** measure, not a latent one,
+and the one consistent positive in this literature is that input-space distance beats latent
+distance — MOOD's authors concluded that "the input space distance is a good surrogate for the
+internal model representation distance," i.e. the latent space adds nothing over it. And
+remarkably, **none of the four graph-OOD benchmarks — GOOD-D, UB-GOLD, PGR-MOOD, SGOOD — contains
+a fingerprint or Tanimoto baseline at all.** The obvious input-space control has never been run.
+
+One structural limit to state up front: a novelty-based signal **cannot** flag activity cliffs by
+construction, since a cliff compound sits near the training set and is still mispredicted. Cliff
+prevalence runs 7–52% depending on target (van Tilborg et al., JCIM 2022), so an honest evaluation
+has to decompose errors into "far from training" versus "near but cliff-like."
+
+So: a testable hypothesis with a plausible mechanism and an unoccupied control — not a result.
 
 ## Determinism: where that 7e-7 comes from
 

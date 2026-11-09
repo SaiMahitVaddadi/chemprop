@@ -26,7 +26,10 @@ architecture investigation mostly validated Chemprop rather than improving it.
 ## Open gaps, by post
 
 - **2** — the cache is a prototype in a standalone harness verified bitwise-identical to Chemprop's
-  math, not integrated into `chemprop train`. The determinism section's sampler findings use
+  math, not integrated into `chemprop train`. Hit rates come from random and scaffold splits only,
+  and scaffold split is a weak shift (median Tanimoto 0.577 → 0.610, vs 0.705+ for clustering), so
+  2.89× is a mild-shift case rather than a worst case. The applicability-domain side effect is a
+  hypothesis, not a result. The determinism section's sampler findings use
   faithful standalone copies of Chemprop's samplers (Chemprop isn't importable in the measurement
   env), so re-verify against the real classes before filing anything upstream.
 - **3** — no canonical-order model was trained, so the traversal idea is argued down (physics,
