@@ -102,12 +102,42 @@ extensive, α = −1 attenuates** — so the mean/sum decision becomes a selecta
 exponent rather than a fork in the road. If you're building this, that's the thing to build.
 
 PNA's other half is multiple aggregators in parallel — mean, max, min, std, var, and higher
-**moments (3rd, 4th, 5th)**. This is the part I think is genuinely underexplored for molecules,
-because mean and sum both collapse the per-atom distribution to its first moment. Neither can
-distinguish *a molecule with a few very unusual atoms* from *a molecule of uniformly ordinary
-atoms* — the variance and skew of the per-atom embedding carry exactly that heterogeneity, and both
-default readouts throw it away. The probe suite above would test it directly: does variance
-aggregation decode anything mean and sum cannot?
+**moments (3rd, 4th, 5th)**. I called this underexplored and then measured it, and the answer is
+mostly no.
+
+Probing RDKit targets from the moments 1..k of the per-atom states (random encoder, 250 molecules,
+R²):
+
+| target | k=1 | k=2 | k=3 | k=4 | k=5 | sum |
+|---|---|---|---|---|---|---|
+| molecular weight | −0.230 | 0.292 | 0.298 | −0.408 | −1.939 | **0.989** |
+| heavy atoms | −0.208 | 0.238 | 0.218 | −0.539 | −2.166 | **0.999** |
+| heteroatoms | −0.256 | −0.038 | 0.212 | −0.307 | −1.823 | **0.982** |
+| TPSA | −0.142 | −0.472 | 0.170 | −0.309 | −1.499 | **0.935** |
+| rotatable bonds | −0.275 | −0.026 | −0.466 | −2.050 | −5.324 | **0.956** |
+| **ring count** | 0.388 | **0.809** | 0.826 | 0.756 | 0.614 | 0.959 |
+| **frac sp³** | **0.966** | 0.967 | 0.954 | 0.931 | 0.883 | 0.608 |
+| logP | **0.585** | 0.227 | 0.245 | 0.014 | −0.430 | 0.745 |
+
+Three things fall out. **Moments saturate at k=2 and k≥3 actively hurts** — fourth and fifth
+central moments are tiny, noisy and wreck the probe's conditioning, so the PNA moments 3/4/5 are
+not justified by this. **Ring count is the one target where variance genuinely helps** (0.388 →
+0.809 at k=2), so heterogeneity across atoms does carry ring information. And the sharpest version
+of this post's thesis: **every extensive target is near-zero or negative from *any* number of
+central moments and ~1.0 from the sum.** That is structural, not empirical — central moments are
+size-invariant by construction, so size information exists only in the un-normalised sum. It isn't
+mean pooling specifically; it's every normalised statistic.
+
+The mirror image holds too: fraction sp³ scores 0.966 from the first moment and 0.608 from the sum.
+Intensive targets want the normalised statistic, extensive ones want the raw sum, and no single
+pooling serves both.
+
+One negative worth recording: I also looked for exact collisions — real molecule pairs whose
+atom-type histograms are *proportional*, which mean pooling must map together. At exact
+proportionality there are **none** in a 250-molecule sample. The theorem is real and the collision
+set is empty in practice, so the injectivity failure shows up as the gradual degradation in the
+table rather than as outright collisions. A tolerance sweep for near-proportional pairs would be
+the stronger test and isn't run.
 
 A wider aggregation design space than Chemprop's four is worth knowing about, and a reference
 implementation of most of it exists in [EGAT](https://github.com/SaiMahitVaddadi/EGAT-Private/tree/v2)

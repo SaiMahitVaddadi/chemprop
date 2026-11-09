@@ -32,14 +32,12 @@ STAGES = [
      "new post - does source re-injection prevent information loss (flow analysis)"),
     ("bond-agg", "bond_aggregation.py", "results_bond_aggregation.json", "~5 min",
      "post 11 - bond-level readout family; pair with rep2 probes to quantify the loss"),
+    ("pooling", "pooling_probes.py", "results_pooling_probes.json", "~8 min",
+     "post 11 - collision test and moment sufficiency"),
     ("anchor", "anchor_study.py", "results_anchor_study.json", "~3 min",
      "post 3 - is there a message-passing starting point, and is anchoring stable"),
     ("gamma", "gamma_ablation.py", "results_gamma_ablation.json", "~40 min",
      "novel: how much is non-backtracking worth"),
-    ("classification", "../scripts/run_sweep.py", "results_classification.jsonl", "~40 min",
-     "post 5 - retires every INCONCLUSIVE classification verdict"),
-    ("mlp", "../scripts/mlp_head.py", "results_mlp.json", "~20 min",
-     "post 5 - ridge-vs-trained-head robustness"),
 ]
 
 
