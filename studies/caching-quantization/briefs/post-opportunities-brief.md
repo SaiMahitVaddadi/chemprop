@@ -49,7 +49,7 @@ everywhere it matters and is the single blocking verification step before §1 is
 
 | # | candidate | central claim | compute | audience | novelty | verdict |
 |---|---|---|---|---|---|---|
-| **1** | **Chemprop's uncertainty stack never sees a molecule** | structurally cannot express what the literature recommends | small | practitioner | **high** | **write first** |
+| **1** | **Chemprop's uncertainty stack never sees a molecule** | it cannot express the method its own benchmark paper recommends | small | practitioner | **high** | **write first** |
 | **2** | **Three scaffold splits, 3–17% shared test set** | "scaffold split" is not a protocol, and MoleculeNet never asked for it | **none** (done) | practitioner / methods | high | **write** |
 | **3** | **Your `--v-kl` is discarded, and the default isn't the documented one** | three disagreeing defaults for the knob that decides what evidential means | small | practitioner / methods | high | **write** |
 | **4** | **Your improvement is smaller than your split noise** | the field's deltas sit inside this study's measured noise floor | **tiny** | practitioner / methods | high | **write** |
@@ -423,7 +423,7 @@ unquantified, and MoleculeACE supplies cliff labels free on bioactivity targets.
 
 ---
 
-## 2. "Three implementations of 'scaffold split' share 3% of their test set"
+## 2. "Three implementations of 'scaffold split' can share as little as 3% of their test set"
 
 **Central claim.** "Bemis–Murcko scaffold split" names a *family* of protocols that put almost
 disjoint molecules in the test set; Chemprop v2's member of that family is as different from itself
@@ -721,30 +721,155 @@ reporter's own suggested fix was *"update the documentation / online help."* The
 `v_kl`, and `SEARCH_PARAM_KEYWORDS_MAP["all"] = list(DEFAULT_SEARCH_SPACE.keys())`, so
 `--search-parameter-keywords all` does not tune it. **No loss-function hyperparameter is searchable.**
 
-**v1 knew it mattered and said so.** `origin/master:chemprop/args.py:474` —
-`evidential_regularization: float = 0`, docstring: *"The default value recommended by Soleimany et
-al. (2021) is 0.2. Optimal value is dataset-dependent; it is recommended that users test different
-values to find the best value for their model."* v2's CLI help repeats that sentence verbatim while
-the code path hard-codes 0.2.
+**Both branches, stated precisely, because the asymmetry is the finding.** With `-l evidential` the
+CLI value wins and you get **λ = 0** (the documented default) and `--v-kl` *is* honoured. Without
+`-l` — the natural invocation, since `-t regression-evidential` already implies the loss — you get
+**λ = 0.2** and `--v-kl` is silently dropped. So the flag works only when it is redundant.
 
-**Why λ is the argument, not a detail.** At λ = 0 the loss is pure NIG negative log likelihood. At
-λ > 0 it adds `λ·(2v + α)·|y − μ|` (`nn/metrics.py:254`), coupling the "evidence" parameters directly
-to the *training residual*. So the quantity reported as epistemic uncertainty is, by construction, a
-learned function of the residual rather than a posterior spread. λ = 0 and λ = 0.2 are not two
-regularisation strengths; they are two different claims about what the output means.
+**And λ = 0 is, theoretically, the single worst choice.** At λ = 0 the objective is the pure
+*overparameterised* NIG negative log likelihood, which has a data-independent minimising path at
+**ν → 0** — and ν is the **denominator** of the epistemic uncertainty, `u²_ep = E[σ²]/ν`. So
+Chemprop's documented CLI default removes the only thing constraining the quantity it then reports as
+epistemic uncertainty. Soleimany et al.'s own λ-ablation includes λ = 0 and shows it is systematically
+overconfident.
 
-> **Citation gap.** The formal critique of evidential regression — Amini et al.'s original (NeurIPS
-> 2020, [arXiv:1910.02600](https://arxiv.org/abs/1910.02600)) is cited in Chemprop's own docstrings,
-> and Soleimany et al. (ACS Cent. Sci. 7(8), 1356–1367, 2021,
-> [10.1021/acscentsci.1c00546](https://doi.org/10.1021/acscentsci.1c00546)) is the chemistry-side
-> promoter. The leads for the critical side — Meinert, Gawlikowski & Lavin, *"The Unreasonable
-> Effectiveness of Deep Evidential Regression"* (AAAI 2023); Bengs, Hüllermeier & Waegeman,
-> *"Pitfalls of Epistemic Uncertainty Quantification through Loss Minimisation"* (NeurIPS 2022) and
-> *"On Second-Order Scoring Rules for Epistemic Uncertainty Quantification"* (ICML 2023) — **were not
-> verified in this sweep** (the dedicated UQ-literature agent had not returned). **Verify these before
-> writing.** The claim "the NIG posterior is not a real posterior and the regulariser is a heuristic"
-> must be sourced, not asserted. Until then, the defensible version of the post rests entirely on the
-> verified code behaviour plus the measurement below.
+**There are five λ "defaults" in circulation, spanning two orders of magnitude** *(all verified from
+source; not reported anywhere)*:
+
+| where | λ | evidence |
+|---|---|---|
+| Amini's reference repo (`aamini/evidential-deep-learning`, `hello_world.py`) | **0.01** | `EvidentialRegression(true, pred, coeff=1e-2)` |
+| Soleimany's Chemprop fork CLI (`aamini/chemprop@confidence-evidential`) | **1.0** | `--regularizer_coeff` `default=1.0` |
+| Soleimany's paper configs and README | **0.2** | `reg_coefs: [0.2, …]` in every `configs/reproducibility/*.json` |
+| Chemprop **v1** CLI | **0** | `evidential_regularization: float = 0` |
+| Chemprop **v2** Python API | **0.2** | `nn/metrics.py:236` |
+| Chemprop **v2** CLI | **0.0** | `cli/train.py:463-469` |
+
+**v1 knew it mattered and said so.** `origin/master:chemprop/args.py:474` docstring: *"The default
+value recommended by Soleimany et al. (2021) is 0.2. Optimal value is dataset-dependent; it is
+recommended that users test different values to find the best value for their model."* v2's CLI help
+repeats that sentence verbatim. Soleimany et al. themselves swept **nine** values
+{0, 0.001, 0.01, 0.1, 0.2, 0.4, 0.6, 1.0, 2.0} on FreeSolv / Lipophilicity / Delaney / QM7 and used
+**λ = 1.0** for the classification arm.
+
+### What the critique actually says — and three corrections to the obvious framing
+
+**Amini, Schwarting, Soleimany & Rus, *"Deep Evidential Regression,"* NeurIPS 33 (2020)**
+([arXiv:1910.02600](https://arxiv.org/abs/1910.02600)) is the method; **Soleimany, Amini, Goldman,
+Rus, Bhatia & Coley, ACS Cent. Sci. 7(8), 1356–1367 (2021)**
+([10.1021/acscentsci.1c00546](https://doi.org/10.1021/acscentsci.1c00546)) is the chemistry-side
+promoter. Both are cited in Chemprop's own docstrings. The critical literature is:
+
+**Meinert, Gawlikowski & Lavin, *"The Unreasonable Effectiveness of Deep Evidential Regression,"*
+AAAI 2023, 37(8):9134–9142** ([arXiv:2205.10060](https://arxiv.org/abs/2205.10060)). The objection is
+**non-identifiability by overparameterisation of the marginal likelihood**, and three details matter:
+
+- It lives in **(ν, β)**, not (ν, α). Verbatim: *"log L^NIG_i does not depend on ν_i and thus L_i(ω)
+  is **minimized, independent of the data**, by sending ν_i → 0 … This ambiguity stays unresolved due
+  to a **missing additional constraint for β_i** in the regularizer."* α is if anything
+  *over*-constrained and gets stuck near 2.
+- The objection is **not** mis-specification. They accept the Bayesian marginal and show that
+  integrating out μ and σ² is a **lossy projection**: the four NIG hyperparameters are not recoverable
+  from the Student-t. Identifiability from the loss, not a wrong likelihood.
+- **The encoded quantity is not the residual.** It is *point-wise convergence speed*, dominated by the
+  earliest epochs: *"residuals of the very first epochs predominantly define how small ν_i will
+  eventually become since the magnitude of its gradient gradually decreases the better the model
+  gets."* Their headline: *"the point-wise convergence speed of the model is used as a proxy for the
+  epistemic uncertainty, which arguably stretches the canonical definition … the numerical values of
+  the epistemic uncertainty cannot be interpreted as canonical Bayesian or Frequentist uncertainty
+  estimations and only relative changes are conclusive."* **One sentence for the post: DER's
+  "epistemic uncertainty" is a fossil record of early-training convergence speed, not a posterior
+  width.** *(An earlier draft of this brief said "a learned function of the training residual." That
+  is close but wrong, and the correct version is more interesting.)*
+
+Two further findings worth using: the **aleatoric** estimate is also quantitatively wrong (synthetic
+cubic with true σ = 3 gives *"a peaking structure with a peak height of roughly 0.7"* — off by ~4×
+and the wrong shape); and re-running Amini's own released code on NYU Depth v2 shows *"the estimation
+of the epistemic uncertainty in the prior art … is nearly equivalent to fitting the width of the
+t-distribution … **missing the main disentanglement goal**."* And the title is not ironic in the way
+it reads: the "effectiveness" account is **optimisation stability** — *"Defining the total evidence by
+two, rather than a single parameter, keeps the optimizer sufficiently busy … thus reducing the
+dependency to the random initialization"* — i.e. Amini's four-parameter head is accidentally a
+regularised version of a degenerate objective. **The honest, awkward core: their own principled fix
+loses to the thing it fixes, and they concede *"we cannot fundamentally fix the underlying issue and
+deliver what was promised."***
+
+**The formal results.** Bengs, Hüllermeier & Waegeman, *"Pitfalls of Epistemic Uncertainty
+Quantification through Loss Minimisation,"* **NeurIPS 2022**
+([arXiv:2203.06102](https://arxiv.org/abs/2203.06102)) is a **squeeze, not a blanket impossibility**:
+Thm 1 — for any inner loss convex in the prediction, the empirical minimiser is Dirac at every sample
+size, so **no epistemic uncertainty is ever reported**; Thm 2 — KL-regularised with λ above a
+threshold never converges to the truth; Thm 3 — below a threshold, Dirac again. Their *"On
+Second-Order Scoring Rules for Epistemic Uncertainty Quantification,"* **ICML 2023, PMLR
+202:2078–2091** ([arXiv:2301.12736](https://arxiv.org/abs/2301.12736)) contains the clean
+DER-specific result: **Proposition 5.3** — *"The deep evidential regression loss function L^DER_2 …
+fulfils the conditions in Theorem 5.2 (ii)"*, i.e. **Amini's exact loss is formally proven not to
+induce a proper second-order scoring rule.** ⚠️ **Do not upgrade this to a blanket impossibility** —
+the authors insist: *"Although our results do not completely exclude existence, they do so for a
+large class of second-order loss functions."* Their diagnosis is the cleanest conceptual statement in
+the literature: a second-order prediction is scored against a zero-order observation, *"one would
+rather need observations of realizations of the first-order distribution … However, such data cannot
+exist even in principle … learning on the second-order (epistemic) level is **necessarily Bayesian
+and requires a prior**."*
+
+**Two independent replications — this is the strong ground.**
+
+- **Jürgens, Meinert, Bengs, Hüllermeier & Waegeman, *"Is Epistemic Uncertainty Faithfully
+  Represented by Evidential Deep Learning Methods?"* ICML 2024, PMLR 235:22624–22642**
+  ([arXiv:2402.09056](https://arxiv.org/abs/2402.09056)). **Thm 3.2:** for Dirichlet and NIG families
+  the joint predictive map is **not injective**, so the risk minimiser is not unique and *"a wide
+  spectrum of [epistemic uncertainty] values is covered."* Meinert's non-identifiability generalised
+  into a theorem covering both DER and Sensoy-style EDL. The regulariser is reframed as an
+  **"uncertainty budget"**: *"the estimated epistemic uncertainty for all training data points is
+  summed up, and this sum is fixed to a certain level determined by λ."* Conclusion: *"**The resulting
+  measures of epistemic uncertainty cannot be interpreted in a quantitative manner.**"* And the
+  empirical corroboration this brief's experiment should port to molecules: *"For a different run of
+  the optimization algorithm **on the same training data**, we observed that the results may look very
+  different"*, with *"Using different orders of magnitude for λ does not seem to significantly change
+  that pattern."*
+- **Shen, Ryu, Ghosh, Bu, Sattigeri, Das & Wornell, *"Are Uncertainty Quantification Capabilities of
+  Evidential Deep Learning a Mirage?"* NeurIPS 2024**
+  ([arXiv:2402.06160](https://arxiv.org/abs/2402.06160)) — independent group, independent mechanism,
+  same verdict: learned distributional uncertainty *"does not vanish with an increasing number of
+  observed samples"*, and *"EDL methods can be better interpreted as an EBM-based OOD detector."*
+  Headline: *"even when EDL methods are empirically effective on downstream tasks, this occurs
+  **despite** their poor uncertainty quantification capabilities."* Directly on λ: UQ is *"sensitive to
+  hyperparameter λ, while generally benefit from small λ"*, **and the aleatoric estimate also varies
+  with λ — which it should not, since data noise is a property of the data.**
+
+The two converge on the same positive account — Jürgens hypothesise the OOD score *"could be
+interpreted as density estimates in feature space"*, Shen arrive at *"EBM-based OOD detector"* — which
+is the most defensible explanation of why DER works at all, and implies you could get the same thing
+more cheaply and honestly with an explicit feature-space density. Earlier and independent:
+**Oh & Shin, *"Improving Evidential Deep Learning via Multi-task Learning,"* AAAI 2022**
+([arXiv:2112.09368](https://arxiv.org/abs/2112.09368)) found the same ν → 0 degeneracy a year before
+Meinert — *"the model can circumvent to achieve lower NLL loss by increasing the predictive
+uncertainty instead of achieving a higher predictive accuracy"*, with Thm 1 proving
+`lim_{ν→0+} ∂L^NLL/∂γ = 0` — and their benchmarks are **drug-target affinity (Davis/KIBA, OOD on
+BindingDB)**, i.e. molecular. **No rebuttal from Amini et al. exists**; the citation graph of
+arXiv:2205.10060 contains no reply, comment or defence.
+
+**On molecular data specifically**, three distinct negative results: Liu, Mo & Cheng, *"Uncertainty
+Qualification for Deep Learning-Based Elementary Reaction Property Prediction,"* **JCIM 2024**
+([10.1021/acs.jcim.4c01358](https://doi.org/10.1021/acs.jcim.4c01358)) — *"The deep ensemble model
+outperforms others in accuracy and shows the highest reliability in estimating prediction uncertainty
+across all elementary reaction property data sets"*, against MC-dropout and evidential, the cleanest
+"evidential loses on chemistry data" result found; Wollschläger et al. ICML 2023 (above), ⚠️ on
+molecular force fields rather than QSAR; and Garain et al., ChemRxiv 2025
+([10.26434/chemrxiv-2025-fx019-v2](https://doi.org/10.26434/chemrxiv-2025-fx019-v2), ⚠️ preprint) —
+*"DER produced uncertainty estimates where data noise and model uncertainty were not cleanly
+separated"* on QM9/WS22, independently corroborating Meinert's disentanglement failure on molecules.
+For honesty, two **contrary** results exist, both in materials rather than molecules: Gruich et al.,
+**MLST 4:025019 (2023)** ([10.1088/2632-2153/accace](https://doi.org/10.1088/2632-2153/accace)), where
+evidential wins on OC20 but *"recalibration of model uncertainties is shown to be essential"*; and
+their 2026 follow-up (arXiv:2607.11091, abstract only).
+
+**The fair verdict to write:** evidential is *a cheap heuristic with no replicated quality advantage
+over an ensemble, whose aleatoric/epistemic split should not be trusted, and whose λ needs per-dataset
+tuning.* Not a failed replication in the strong sense — a method whose headline claims were never
+independently reproduced as *superiority*. Its pitch was never "better than an ensemble"; it was
+"≈ ensemble quality at 1/N cost", and Soleimany's own active-learning result concedes the ensemble is
+better.
 
 **The NaN story, same code path, worth a section.** `EvidentialFFN.forward` produces
 `v = softplus(·)`, `alpha = softplus(·) + 1`, `beta = softplus(·)` with **no floor on any of them**
@@ -758,16 +883,68 @@ now"** after the reporter said neither `--grad-clip` nor a lower LR worked. The 
 **#370/#371 "Clamp evidential `v` parameter"** exist — the fix was known in v1 and not carried into
 v2. `MveFFN` has the same unfloored `softplus` and `MVELoss` the same `(mean − targets)²/(2·var)`.
 
-**Experiment.** Sweep λ ∈ {0, 0.01, 0.05, 0.2, 1.0} on a small evidential head over frozen CheMeleon
-embeddings, 5 regression datasets × the existing 6 random + 4 scaffold splits; report RMSE, NLL and
-**spearman(unc, |err|)** per λ, plus **how often the run NaNs**. Falsifiable hypothesis to state in
-advance: λ trades point accuracy against uncertainty discrimination monotonically, so no λ exists at
-which evidential beats a 5-member ensemble on both axes. The existing noise floor (paired-delta SE
-1.07–2.27%) sets the readable effect size. Tens of minutes; shares candidate 1's run.
+### Experiment: a seed-replication identifiability audit
+
+**The gap.** Jürgens et al. *prove* the NIG → Student-t map is non-injective so the derived epistemic
+uncertainty *"can take almost any value"*, and corroborate it empirically — **on synthetic and vision
+data only**. Meinert et al. independently predict the mechanism: ν is set by early-epoch convergence
+speed. **Nobody has tested either on molecules**, and nobody has measured what Chemprop's λ = 0 CLI
+default does to any of it.
+
+**Design.** 4 datasets already in the tree (FreeSolv 642, ESOL 1128, BACE 1513, BBBP 2039 — exactly
+the low-N set both Soleimany and Hirschfeld used) × λ ∈ {0, 0.01, 0.1, 0.2, 1.0} × 10 seeds, training
+`regression-evidential` with the **split held fixed** across seeds so the only variation is optimiser
+randomness. Repeat under random and scaffold splits. Cache per-molecule `(γ, ν, α, β)` on test, plus
+per-molecule training residuals logged at epochs 1, 2, 3, 5, 10 and at convergence. Matched MVE and
+5-member ensemble control arms.
+
+**Five measurements, each a falsifiable prediction from a named theorem.**
+
+1. **The identifiability signature.** Across seeds on identical data, compare the coefficient of
+   variation of γ against that of ν and β, and the across-seed **Spearman agreement** of per-molecule
+   `β/(ν(α−1))`. Theory predicts γ agrees tightly while ν and β are near-arbitrary and the epistemic
+   *ranking* is unstable. **The first direct test of Jürgens Thm 3.2 on molecular data.** If γ is
+   stable and the epistemic ranking is not, that one scatter plot is the whole post.
+2. **The convergence-speed fossil.** Correlate final test-time `1/ν` against the per-molecule
+   residual at epochs 1–3 versus at convergence. Meinert predicts the early correlation ≫ the final
+   one. A clean one-number test of a named mechanism, never measured on molecules.
+3. **The λ split-brain, quantified.** Spearman / ENCE / miscalibration area / NLL at λ = 0 (v2 CLI
+   default) vs 0.2 (v2 API default) vs 0.01 (Amini's repo) vs 1.0 (Soleimany's fork) — i.e. measuring
+   how much the shipped estimator depends on which door the user walked through. Combined with (1),
+   test whether λ damps the seed instability; Jürgens report it does not, on other data.
+4. **The unfixability demonstration.** Apply `zscaling`, `zelikman-interval` and
+   `conformal-regression` to the cached uncertainties and show the `spearman` column is **bit-identical
+   before and after**, then show `mve-weighting` is the only one that moves it. Provable from the code,
+   so this is a *demonstration* rather than a discovery — but the composition is the payoff: *the
+   seed-to-seed ranking instability from (1) is, by construction, unfixable by the calibrators the
+   package ships.*
+5. **Conformal coverage × calibration-fold provenance.** Reusing the same checkpoints, measure
+   empirical coverage against nominal 1 − α with the calibration fold drawn from **training scaffolds**
+   versus **novel scaffolds**, under random and scaffold splits. This is candidate 1's Consequence C,
+   and it has never been done for Chemprop/D-MPNN.
+
+**Cost.** Chemprop's uncertainty module is decoupled from training (estimator / calibrator / evaluator
+all operate on cached predictions), so **one training run per (dataset, λ, seed) serves all five
+measurements.** 4 × 5 × 10 = 200 runs on ≤2,039 molecules; minutes per run on MPS; overnight on a
+laptop, and the analysis re-runs from cached tensors in seconds. Also log **how often the run NaNs**
+per λ — free, and the practitioner payload.
+
+**Two framing cautions.** Report all four datasets **separately, never averaged** — Hirschfeld's own
+warning is *"if one were to benchmark UQ methods on a single dataset, one could draw completely
+incorrect conclusions"*, and the general-ML version (Mucsányi et al.) finds *"Nine out of thirteen
+tasks exhibit substantially different rankings between CIFAR-10 and ImageNet."* And Rasmussen et al.
+show Spearman and NLL *"bear little information in themselves"* without simulated reference values —
+so either include their simulated-reference construction, or report Spearman only as an across-seed
+*agreement* statistic (measurement 1), where it is self-referential and the objection does not bite.
 
 **Audience** practitioner (pick a λ, or don't use evidential) and methods. **Novelty:** the
-Chemprop-specific chain is new and fully verified; the statistical critique is not new and must be
-sourced as prior work, not findings.
+Chemprop-specific chain (five defaults, discarded flag, unsearchable) is new and fully verified, and
+measurements 1–2 are the first molecular tests of two named published predictions. The statistical
+critique itself is **not** new and must be sourced as prior work. One thing **not** to say: there is
+**no theorem** that a single forward pass provably cannot separate aleatoric from epistemic
+uncertainty — the nearest real thing is Meinert's one-equation-two-unknowns argument, explicitly a
+heuristic, and the empirical disentanglement failures hit ensembles, MC dropout, Laplace and SWAG just
+as hard.
 
 ---
 
@@ -1375,9 +1552,37 @@ add-on experiment under candidate 1. Also note the regime-dependence result — 
 the mean pairwise similarity … within a QSAR training set is less than 0.5, one can use only TREE_SD,
 PREDICTED, but otherwise one should use TREE_SD, PREDICTED, SIMILARITYNEAREST1"* — **single paper,
 proprietary Merck data, random forest only, never replicated on public data or for neural models.**
-**Disposition:** the premise of the original ask is wrong; the honest post is candidate 1's
-"combine, don't choose", and the cheap replication targets are the Liu & Wallqvist turn-down and
-Sheridan's 0.5 diversity threshold.
+The second, independent sweep reached the same place from the UQ side and supplied the defensible
+wording: *"Fingerprint- and latent-distance baselines are competitive with learned UQ for
+rank-ordering errors on molecules, and have been reported to beat specific learned baselines on
+specific datasets (Janet 2019; Musielewicz et al. 2024 for GNN interatomic potentials). But the one
+systematic head-to-head on molecular property regression (Hirschfeld, JCIM 2020) found no method
+consistently superior, did not find distance methods on top, and recommended a learned method. The
+stronger claim is not established."* Note also Hirschfeld's structural reason why distance baselines
+*should* sometimes fail: *"Distance metrics implicitly assume that there is a relatively smooth
+mapping between the input representation and the output value, so … this assumption is clearly
+violated for some molecular property prediction tasks due to the known presence of structure-activity
+cliffs."* **Disposition:** the premise of the original ask is wrong; downgrade it to a conjecture
+wherever it appears. The honest post is candidate 1's "combine, don't choose", and the cheap
+replication targets are the Liu & Wallqvist non-monotone turn-down and Sheridan's 0.5 diversity
+threshold.
+
+**P2b. "GOOD and DrugOOD are uncertainty benchmarks." — NO.** Verified by grepping the full texts:
+**`"calibrat"` returns 0 hits in both.** Gui, Li, Wang & Ji, *GOOD*, **NeurIPS 2022 D&B**
+([arXiv:2206.08452](https://arxiv.org/abs/2206.08452)) and Ji et al., *DrugOOD*
+([arXiv:2201.09637](https://arxiv.org/abs/2201.09637)) measure **OOD generalisation**, i.e. accuracy
+under shift, not UQ — DrugOOD's "uncertainty" hits concern *measurement* uncertainty during curation.
+The same goes for Antoniuk et al., *BOOM*, **NeurIPS 2025 D&B**
+([arXiv:2505.01912](https://arxiv.org/abs/2505.01912)), which is nonetheless worth citing for its own
+finding across 150+ model-task combinations: *"no existing model achieves strong generalization across
+all tasks: even the top-performing model exhibited an average OOD error 3× higher than
+in-distribution. Current chemical foundation models do not show strong OOD extrapolation"*, with the
+mechanism that poor-OOD models *"overwhelmingly produce an S-shaped parity plot … capable of
+clustering OOD samples together but unable to extend the prediction region beyond the training
+data"*, and *"ID performance is not necessarily correlated with OOD performance."* **Use these for
+"models don't generalise OOD," never for "UQ doesn't detect OOD."** The gap is itself notable: all
+three major molecular OOD benchmarks measure accuracy under shift and **none measures calibration
+under shift** — which is the hole candidate 1's headline figure falls into.
 
 **P3. "GNN latent-space distance is a reliable applicability-domain metric." — UNSUPPORTED, not
 refuted.** Janet, Duan, Yang, Nandy & Kulik, **Chem. Sci. 10, 7913–7922 (2019)**,
@@ -1561,23 +1766,37 @@ dependency-archaeology rather than an experiment. **One sentence in post 4 as a 
 
 ## Open gaps in this brief
 
-1. **The evidential-critique citations are unverified.** The dedicated UQ-literature sweep had not
-   returned when this was written. Candidate 3's code findings stand alone, but the statistical
-   critique of deep evidential regression — Meinert/Gawlikowski/Lavin (AAAI 2023), Bengs/Hüllermeier/
-   Waegeman (NeurIPS 2022, ICML 2023) — **must be verified before being cited**. Until then, do not
-   assert "the NIG posterior is not a real posterior."
-2. **§2's split numbers are re-implementations, not the installed packages.** Blocking for candidate 2.
+1. **§2's split numbers are re-implementations, not the installed packages.** Blocking for candidate 2.
+   `scripts/split_audit.py` reproduces every number in §2 and documents exactly which upstream source
+   each re-implementation was read from; raw output in `results/split_audit.txt`.
+2. **Two things the Chemprop authors might say officially could not be retrieved.** The **SI of the
+   Chemprop software paper** (Heid et al.,
+   [10.1021/acs.jcim.3c01250](https://doi.org/10.1021/acs.jcim.3c01250)) contains its UQ benchmark, and
+   the **Chemprop v2 paper** (Graff et al.,
+   [10.1021/acs.jcim.5c02332](https://doi.org/10.1021/acs.jcim.5c02332)) has no PMC record yet; ACS
+   blocks automated fetch. These are the only places the authors might state a shipped-default
+   recommendation, so **get them before claiming anything about what Chemprop officially recommends**.
 3. **Novelty claims rest on targeted searches, not exhaustive sweeps.** Specifically re-check
    "distance-conditional conformal" and "Mondrian applicability domain" (candidate 1) and
    "scaffold split implementation variance" (candidate 2) on Google Scholar and OpenReview, which the
-   sweeps could not cover. All four literature agents exhausted the session's WebSearch budget and
-   finished via Crossref / Europe PMC / arXiv APIs — more reliable for citation accuracy, weaker for
-   open-ended discovery. Absence of a paper below is **weak** evidence.
-4. **Three leads could not be verified and must not be cited on this brief's authority:** the LRGB
+   sweeps could not cover. All five literature agents exhausted the session's WebSearch budget and
+   finished via Crossref / Europe PMC / NCBI / arXiv APIs — more reliable for citation accuracy, weaker
+   for open-ended discovery. Absence of a paper here is **weak** evidence.
+4. **Leads that could not be verified and must not be cited on this brief's authority:** the LRGB
    original's arXiv ID (commonly given as 2206.08164); arXiv:2502.03982 on temporal shift in
-   pharmaceutical data; and ChemBERTa-3's exact wording about MoLFormer's scaffold splits differing
-   from DeepChem's (reached only via a search snippet; the ChemRxiv PDF 403'd).
+   pharmaceutical data; ChemBERTa-3's exact wording about MoLFormer's scaffold splits differing from
+   DeepChem's (search snippet only; the ChemRxiv PDF 403'd); Meinert & Lavin's `Φ = ν + 2α` correction
+   (arXiv:2104.06135) appears never to have been published beyond preprint; Cortés-Ciriano, Firth,
+   Bender & Watson, JCIM 2018 ([10.1021/acs.jcim.8b00376](https://doi.org/10.1021/acs.jcim.8b00376)) —
+   paywalled, cite as reported-in-review and do not quote numbers; and no clean primary record was
+   found for the Platt 1999 chapter.
 5. **ACS Publications returns HTTP 403 to automated fetches.** Every ACS abstract quoted here came
-   from PubMed, which carries the publisher-deposited abstract verbatim. Two full texts were read from
-   extracted PDF (Liu 2019 "Dissecting"; Hirschfeld 2020 preprint), so quotes from those include body
-   text.
+   from PubMed, which carries the publisher-deposited abstract verbatim. Three full texts were read
+   from extracted PDF (Liu 2019 "Dissecting"; Hirschfeld 2020 preprint; Meinert 2023), so quotes from
+   those include body text.
+6. **A latent disagreement in the evidential literature worth knowing about.** Meinert et al. note
+   that the published regulariser's `Φ = 2ν + α` arguably **miscounts the NIG pseudo-observations**,
+   and that `Φ = ν + 2α` *"would actually be better motivated"* and is already used in some
+   follow-ups. So implementations silently diverge on the regulariser itself, not just its coefficient.
+   Chemprop uses the published `(2v + alpha)` form (`nn/metrics.py:254`), which is the right call for
+   fidelity to Amini — but it means "evidential" is not one method across packages either.

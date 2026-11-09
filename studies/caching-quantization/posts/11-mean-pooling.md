@@ -167,6 +167,80 @@ axis drops it back to 0.326. So the apparent similarity between a learned embedd
 descriptor vector is largely **one shared size direction**, which is exactly the direction mean
 pooling removes.
 
+## The bigger loss is bonds, not scale
+
+Everything above is about *how* atoms are pooled. The larger omission is *what* is pooled, and it's
+the one I'd now put first.
+
+Chemprop's `MPNN.fingerprint` is three lines:
+
+```python
+H_v = self.message_passing(bmg, V_d)   # atom states only
+H   = self.agg(H_v, bmg.batch)         # atoms -> molecule
+H   = self.bn(H)
+```
+
+Message passing computes its hidden states on **directed bonds**. Those states are consumed
+*inside* `_MessagePassingBase.forward` — scattered into atoms via `M_v = Σ_{f: dest(f)=v} H_f` —
+and never returned. Every readout in the standard model therefore operates on atoms, and the
+per-bond states are gone before the aggregation layer ever sees them.
+
+This is not a missing capability. `mol_atom_bond.py:229` already has `edge_finalize(H, E, E_d)`
+with its own learned projection `W_eo = nn.Linear(d_e + d_h, d_h)`, and line 304 returns
+`(H_v, H_e)`. The bond readout exists, is trained, and the plain `MPNN` has no path to it.
+
+What the atom scatter destroys, precisely:
+
+- **Per-bond identity.** Which bond contributed what is gone.
+- **Every non-linear bond statistic.** The atom sum is a *linear* functional of the edge states, so
+  anything non-linear across the bonds at an atom — variance, max, min, skew — is unrecoverable
+  from it in principle, not just in practice.
+- **The directed pairing.** `H_{u→v}` and `H_{v→u}` are different vectors, and the sum at *v*
+  receives only the inbound half. The total "mass" survives (each directed edge lands in exactly
+  one atom sum) but the pairing does not.
+
+For reactions this is the sharpest version of the problem. In a condensed graph of reaction the
+bonds *are* the signal — which bonds break and form is the reaction — and the standard model
+projects them through an atom sum before any readout.
+
+So here is the whole family, implemented for edge-level pooling in
+`experiments/bond_aggregation.py`, with the measured participation ratio of each on a 100-molecule
+batch at `d_h=300` as a conditioning check:
+
+| mode | out dim | participation ratio | character |
+|---|---|---|---|
+| `sum` | d_h | 5.0 | extensive |
+| `norm` (÷ constant) | d_h | 5.0 | extensive, rescaled |
+| `mean` | d_h | 15.1 | intensive |
+| `l2row` | d_h | 16.5 | intensive, magnitude-free |
+| `max` | d_h | **37.9** | order statistic |
+| `min` | d_h | 17.9 | order statistic |
+| `std` | d_h | **30.3** | spread — *not* recoverable from an atom sum |
+| `var` | d_h | 20.7 | spread |
+| `moment3/4/5` | d_h | 15.8 / 4.7 / 3.6 | skew, kurtosis |
+| `pna` | 4 × \|scalers\| × d_h | 28.4 | PNA stats × degree scalers |
+| `attention` | d_h | 15.1 | learned, softmax weighted |
+| `gated` | d_h | 4.7 | learned soft selection |
+| `bondtype` | n_types × d_h | 18.8 | one pool per bond order |
+
+The participation ratios are the interesting column. `sum` and `norm` sit at **5.0** — nearly all of
+their variance in a handful of directions — while `max` reaches **37.9** and `std` **30.3**. The
+order statistics and the spread spread information across many more directions than the sum does,
+which is consistent with them carrying something the sum cannot express.
+
+Two implementation notes. The `attention` mode subtracts a per-molecule maximum before
+exponentiating; Chemprop's `AttentiveAggregation` calls `.exp()` directly on its logits with no
+max-subtraction, which is a textbook overflow hazard (`exp` of a large logit gives `inf`, then
+`inf/inf` gives `nan`). And `bondtype` pooling — a separate pool per bond order, concatenated — is
+the cheapest chemistry-aware option in the list and has no analogue in Chemprop at all.
+
+**What this does not yet show is that any of it helps.** The table measures shape and conditioning
+on a model whose weights were trained with an atom-only readout, so these edge states are not what
+a bond-readout model would learn. The number that would settle it is the probe suite from earlier
+in this post, run on atom-only versus atom-plus-bond readout: if bond pooling decodes bond-flavoured
+targets — rotatable-bond count, conjugation, aromatic-bond count, ring-bond count — that the atom
+sum cannot, that quantifies the loss instead of arguing it. That experiment is wired up and unrun.
+
 ## Caveats
 
 These are **linear** probes on **frozen** embeddings. A linear probe failing does not show

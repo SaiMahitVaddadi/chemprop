@@ -30,6 +30,8 @@ STAGES = [
      "post 2 - dataloader/sampler/scaler determinism (the axis that moves seed variance)"),
     ("residual-flow", "residual_flow.py", "results_residual_flow.json", "~15 min",
      "new post - does source re-injection prevent information loss (flow analysis)"),
+    ("bond-agg", "bond_aggregation.py", "results_bond_aggregation.json", "~5 min",
+     "post 11 - bond-level readout family; pair with rep2 probes to quantify the loss"),
     ("gamma", "gamma_ablation.py", "results_gamma_ablation.json", "~40 min",
      "novel: how much is non-backtracking worth"),
     ("classification", "../scripts/run_sweep.py", "results_classification.jsonl", "~40 min",
