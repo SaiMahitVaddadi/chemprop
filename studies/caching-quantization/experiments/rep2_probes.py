@@ -44,10 +44,18 @@ def main():
         "Pooled corpus mixes 11 datasets with very different chemistry; the pooled "
         "target variance is therefore larger than within any single dataset, which "
         "makes R2 look better than it would within-dataset.",
+        "CIRCULARITY WARNING: the rdkit2d column is NOT an independent comparison "
+        "for most targets. MolWt, TPSA, MolLogP, MolMR, LabuteASA, NumHDonors, "
+        "RingCount, FractionCSP3 etc. ARE columns of the RDKit descriptor vector, "
+        "so that probe is reading the answer off its own input. Its R2~1.0 on those "
+        "rows is a sanity check, not evidence. Use rep3's downstream tasks for the "
+        "honest head-to-head.",
+        "chemeleon_sumagg is Z * n_heavy_atoms, the exact sum-aggregated embedding "
+        "of the same encoder; it is reconstructed, not re-encoded.",
     ]}
     t0 = time.perf_counter()
     smis, Z, src = R.pooled()
-    Tg, ok = R.rdkit_targets(smis)
+    Tg, ok = R.cached_obj("pool_targets", lambda: R.rdkit_targets(smis))
     smis = [s for s, k in zip(smis, ok) if k]
     Z = Z[ok]
     Y = np.stack([Tg[n][ok] for n, _ in R.TARGETS], 1)
@@ -61,14 +69,22 @@ def main():
     reps["chemeleon"] = Z
     print("building controls ...")
     t = time.perf_counter()
-    reps["randenc"] = R.rand_encoder_Z(smis, seed=0)
+    reps["randenc"] = R.cached("pool_randenc0", lambda: R.rand_encoder_Z(smis, seed=0))
     print(f"  random-weight CheMeleon encoder: {time.perf_counter()-t:.0f}s")
     reps["gauss2048"] = rng.standard_normal((n, 2048)).astype(np.float32)
     t = time.perf_counter()
-    reps["ecfp4_counts"] = R.ecfp4(smis)
-    Xd, dnames = R.rdkit2d(smis)
+    reps["ecfp4_counts"] = R.cached("pool_ecfp4", lambda: R.ecfp4(smis))
+    Xd = R.cached("pool_rdkit2d", lambda: R.rdkit2d(smis)[0])
     reps["rdkit2d"] = Xd
     print(f"  ecfp4 + rdkit2d ({Xd.shape[1]} desc): {time.perf_counter()-t:.0f}s")
+    assert np.isfinite(Xd).all()
+    # SUM aggregation, reconstructed exactly: the cached Z is a MEAN over heavy
+    # atoms, so Z * n_heavy is the sum-aggregated embedding the same encoder would
+    # have produced. This isolates how much of the probe failure is the AGGREGATOR
+    # rather than the encoder.
+    nheavy = Tg["heavy_atoms"][ok]
+    reps["chemeleon_sumagg"] = (Z.astype(np.float64) * nheavy[:, None]).astype(np.float32)
+
     # low-capacity variant of the real representation
     mu, V, S = R.pca_basis(Z, 64)
     reps["chemeleon_pca64"] = ((Z.astype(np.float64) - mu) @ V.T).astype(np.float32)
@@ -87,12 +103,15 @@ def main():
             P, ym = R.ridge_multi(X, Y, tr, te, R.LAM_PROBE)
             Pc, _ = R.ridge_multi(X, Yctl, tr, te, R.LAM_PROBE)
             for j, nm in enumerate(names):
-                acc[nm].append(_score(kinds[nm], Y[te, j], P[:, j], Y[tr, j]))
-                accc[nm].append(_score(kinds[nm], Yctl[te, j], Pc[:, j], Yctl[tr, j]))
+                acc[nm].append(R.score_target(kinds[nm], Y[te, j], P[:, j]))
+                accc[nm].append(R.score_target(kinds[nm], Yctl[te, j], Pc[:, j]))
         res[rn] = {nm: dict(kind=kinds[nm],
-                            score=float(np.mean(acc[nm])), sd=float(np.std(acc[nm])),
-                            control=float(np.mean(accc[nm])),
-                            selectivity=float(np.mean(acc[nm]) - np.mean(accc[nm])))
+                            score=float(np.mean([a[0] for a in acc[nm]])),
+                            sd=float(np.std([a[0] for a in acc[nm]])),
+                            spearman=float(np.mean([a[1] for a in acc[nm]])),
+                            control=float(np.mean([a[0] for a in accc[nm]])),
+                            selectivity=float(np.mean([a[0] for a in acc[nm]])
+                                               - np.mean([a[0] for a in accc[nm]])))
                    for nm in names}
         print(f"  {rn:<18} {X.shape[1]:>5}d  {time.perf_counter()-t:.0f}s")
     out["n_mol"] = n
@@ -101,16 +120,16 @@ def main():
     out["probes"] = res
 
     # ------------- table -------------
-    print(f"\n{'target':<22}{'kind':>5}{'CheMeleon':>11}{'sd':>7}{'ctrl':>7}"
-          f"{'randenc':>9}{'gauss':>8}{'pca64':>8}{'ECFP4':>8}{'RDKit2D':>9}{'lift':>8}")
+    print(f"\n{'target':<22}{'kind':>5}{'CheMeleon':>11}{'rho':>7}{'ctrl':>7}"
+          f"{'randenc':>9}{'gauss':>8}{'pca64':>8}{'ECFP4':>8}{'RDKit2D':>9}{'sumagg':>8}{'lift':>8}")
     rows = []
     for nm in names:
         a = res["chemeleon"][nm]
         rr = res["randenc"][nm]["score"]
-        rows.append((nm, a["kind"], a["score"], a["sd"], a["control"], rr,
+        rows.append((nm, a["kind"], a["score"], a["spearman"], a["control"], rr,
                      res["gauss2048"][nm]["score"], res["chemeleon_pca64"][nm]["score"],
                      res["ecfp4_counts"][nm]["score"], res["rdkit2d"][nm]["score"],
-                     a["score"] - rr))
+                     res["chemeleon_sumagg"][nm]["score"], a["score"] - rr))
     for r in sorted(rows, key=lambda x: -x[2]):
         print(f"{r[0]:<22}{r[1]:>5}" + "".join(f"{v:>9.3f}" if i in (1,) else f"{v:>8.3f}"
               for i, v in enumerate(r[2:])))
@@ -120,20 +139,8 @@ def main():
     print("\nleast linearly decodable regression targets (R2 < 0.70):")
     for r in sorted(hard, key=lambda x: x[2]):
         print(f"  {r[0]:<22} R2={r[2]:.3f} (randenc {r[5]:.3f}, ECFP4 {r[8]:.3f}, "
-              f"RDKit2D {r[9]:.3f})")
+              f"RDKit2D {r[9]:.3f}, sum-agg CheMeleon {r[10]:.3f})")
     R.jdump(out, f"{R.RESULTS}/results_rep2_probes.json")
-
-
-def _score(kind, yte, p, ytr):
-    if kind == "reg":
-        v = yte.var()
-        if v <= 0:
-            return np.nan
-        return float(1 - ((p - yte) ** 2).mean() / v)
-    from sklearn.metrics import roc_auc_score
-    if len(np.unique(yte)) < 2:
-        return np.nan
-    return float(roc_auc_score(yte, p))
 
 
 main()

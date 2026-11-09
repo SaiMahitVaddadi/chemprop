@@ -101,8 +101,8 @@ TARGETS = [
     ("n_rot_bonds", "reg"), ("ring_count", "reg"), ("aromatic_rings", "reg"),
     ("aliphatic_rings", "reg"), ("n_ring_systems", "reg"), ("max_ring_size", "reg"),
     ("n_bridgehead", "reg"), ("n_spiro", "reg"),
-    ("graph_diameter", "reg"), ("bertz_ct", "reg"), ("balaban_j", "reg"),
-    ("kappa3", "reg"), ("chi1v", "reg"), ("n_stereocenters", "reg"),
+    ("graph_diameter", "reg"), ("log_bertz_ct", "reg"), ("balaban_j", "reg"),
+    ("log_kappa3", "reg"), ("chi1v", "reg"), ("n_stereocenters", "reg"),
     ("qed", "reg"), ("fsp3_scaffold", "reg"),
 ] + [(k, "cls") for k in SMARTS]
 
@@ -112,7 +112,7 @@ LOCAL = {"mol_wt", "heavy_atoms", "n_hetero", "n_hbd", "n_hba", "frac_csp3",
          "chi1v", "fg_halogen", "fg_sulfur_any"}
 GLOBAL = {"n_rot_bonds", "ring_count", "aromatic_rings", "aliphatic_rings",
           "n_ring_systems", "max_ring_size", "n_bridgehead", "n_spiro",
-          "graph_diameter", "bertz_ct", "balaban_j", "kappa3", "qed",
+          "graph_diameter", "log_bertz_ct", "balaban_j", "log_kappa3", "qed",
           "fsp3_scaffold", "n_stereocenters"}
 
 
@@ -187,9 +187,9 @@ def rdkit_targets(smis):
             "n_bridgehead": rdMolDescriptors.CalcNumBridgeheadAtoms(m),
             "n_spiro": rdMolDescriptors.CalcNumSpiroAtoms(m),
             "graph_diameter": diam,
-            "bertz_ct": GraphDescriptors.BertzCT(m),
+            "log_bertz_ct": float(np.log1p(max(GraphDescriptors.BertzCT(m), 0.0))),
             "balaban_j": GraphDescriptors.BalabanJ(m),
-            "kappa3": rdMolDescriptors.CalcKappa3(m),
+            "log_kappa3": float(np.log1p(max(rdMolDescriptors.CalcKappa3(m), 0.0))),
             "chi1v": rdMolDescriptors.CalcChi1v(m),
             "n_stereocenters": nst,
             "qed": QED.qed(m),
@@ -242,12 +242,15 @@ def rdkit2d(smis):
             continue
         X[i] = [d.get(n, np.nan) for n in names]
     X[~np.isfinite(X)] = np.nan
-    # column-median impute, then drop constant columns
+    # column-median impute, then drop constant and numerically unusable columns.
+    # RDKit's Ipc overflows float64 on large molecules (it is a product of
+    # characteristic-polynomial coefficients), so it is dropped outright.
     med = np.nanmedian(X, 0)
     med[~np.isfinite(med)] = 0.0
     X = np.where(np.isfinite(X), X, med[None, :])
-    keep = X.std(0) > 0
-    return X[:, keep].astype(np.float32), [n for n, k in zip(names, keep) if k]
+    keep = (X.std(0) > 0) & (np.abs(X).max(0) < 1e12)
+    keep &= np.array([n != "Ipc" for n in names])
+    return np.ascontiguousarray(X[:, keep]), [n for n, k in zip(names, keep) if k]
 
 
 def rand_encoder_Z(smis, seed=0, d_h=2048, depth=6, chunk=400):
@@ -297,6 +300,102 @@ def ridge_multi(X, Y, tr, te, lam):
     rhs = A.T @ ((Yt - ym) / ys)
     W = np.linalg.solve(L.T, np.linalg.solve(L, rhs))
     return (B @ W) * ys + ym, ym
+
+
+def ridge_dual_multi(X, Y, tr, te, lam):
+    """Ridge from X to many targets, solved in the DUAL (n x n) form.
+
+    Mathematically identical to ridge_multi (same z-scoring, same penalised
+    intercept column) but costs O(n^3) instead of O(d^3), which is what makes
+    4096-d concatenated representations affordable at n<=2200. Verified against
+    qlib.Head / ridge_multi in rep3.
+    """
+    X = X.astype(np.float64)
+    mu, sg = _zscale(X[tr])
+    A = np.concatenate([(X[tr] - mu) / sg, np.ones((len(tr), 1))], 1)
+    B = np.concatenate([(X[te] - mu) / sg, np.ones((len(te), 1))], 1)
+    Yt = Y[tr].astype(np.float64)
+    ym, ys = Yt.mean(0), np.maximum(Yt.std(0), 1e-12)
+    K = A @ A.T
+    K.flat[:: K.shape[0] + 1] += lam
+    alpha = np.linalg.solve(K, (Yt - ym) / ys)
+    return (B @ (A.T @ alpha)) * ys + ym
+
+
+class DualRidge:
+    """Dual (kernel) ridge with the train Gram and cross term built ONCE.
+
+    G = A A^T and C = B A^T depend only on (X, split), so a lambda sweep and a
+    NaN-masked multi-task fit reuse them. A NaN-masked task t uses the exact
+    submatrices G[ix_(m,m)] and C[:, m]. Verified against qlib.Head to ~1e-5
+    (the residual is the float32 cache precision, not the solver).
+    """
+
+    def __init__(self, X, tr, te, clip=None):
+        X = X.astype(np.float64)
+        mu, sg = _zscale(X[tr])
+        A = (X[tr] - mu) / sg
+        B = (X[te] - mu) / sg
+        if clip is not None:
+            # Uniform guard against test-time extrapolation. Raw RDKit descriptors
+            # have unbounded ranges (one freesolv test molecule otherwise drives the
+            # ridge to RMSE 10), so every representation gets the same clip. For
+            # CheMeleon it almost never binds; the effect is reported in rep3.
+            A = np.clip(A, -clip, clip)
+            B = np.clip(B, -clip, clip)
+        A = np.concatenate([A, np.ones((len(tr), 1))], 1)
+        B = np.concatenate([B, np.ones((len(te), 1))], 1)
+        self.G = A @ A.T
+        self.C = B @ A.T
+        self.n_te = len(te)
+
+    def predict(self, Y, tr, lam):
+        T = Y.shape[1]
+        P = np.full((self.n_te, T), np.nan)
+        full = ~np.isnan(Y[tr]).any(0)
+        if full.any():
+            cols = np.where(full)[0]
+            Yt = Y[tr][:, cols]
+            ym, ys = Yt.mean(0), np.maximum(Yt.std(0), 1e-12)
+            K = self.G.copy()
+            K.flat[:: K.shape[0] + 1] += lam
+            P[:, cols] = self.C @ np.linalg.solve(K, (Yt - ym) / ys) * ys + ym
+        for t in np.where(~full)[0]:
+            m = np.where(~np.isnan(Y[tr, t]))[0]
+            if len(m) < 10:
+                continue
+            yv = Y[tr[m], t]
+            ym, ys = yv.mean(), max(yv.std(), 1e-12)
+            K = self.G[np.ix_(m, m)].copy()
+            K.flat[:: K.shape[0] + 1] += lam
+            P[:, t] = self.C[:, m] @ np.linalg.solve(K, (yv - ym) / ys) * ys + ym
+        return P
+
+
+def score_split(P, Y, te, task_type):
+    """Primary metric per task from a prediction matrix (RMSE reg / AUROC cls)."""
+    from sklearn.metrics import roc_auc_score
+    T = Y.shape[1]
+    vals = np.full(T, np.nan)
+    for t in range(T):
+        m = ~np.isnan(Y[te, t])
+        if m.sum() < 5 or np.isnan(P[m, t]).any():
+            continue
+        if task_type == "reg":
+            vals[t] = float(np.sqrt(((P[m, t] - Y[te, t][m]) ** 2).mean()))
+        else:
+            if len(np.unique(Y[te, t][m])) < 2:
+                continue
+            vals[t] = float(roc_auc_score(Y[te, t][m], P[m, t]))
+    return vals
+
+
+def fit_eval(X, Y, tr, te, task_type, lam, return_per_task=False):
+    """Convenience wrapper: one split, one lambda, primary metric."""
+    v = score_split(DualRidge(X, tr, te).predict(Y, tr, lam), Y, te, task_type)
+    if return_per_task:
+        return v
+    return float(np.nanmean(v)) if np.isfinite(v).any() else np.nan
 
 
 def ridge_fit(X, y, lam):
@@ -368,6 +467,22 @@ def linear_cka(X, Y, standardize=False):
     return float(num / (dx * dy)) if dx > 0 and dy > 0 else np.nan
 
 
+def pca_reduce(X, var=0.99, kmax=256):
+    """PCA-truncate to `var` explained variance (capped at kmax). Returns scores."""
+    A = _center(X)
+    U, S, Vt = np.linalg.svd(A, full_matrices=False)
+    cs = np.cumsum(S ** 2) / np.sum(S ** 2)
+    kk = min(int(np.searchsorted(cs, var) + 1), kmax, A.shape[0] - 1)
+    return U[:, :kk] * S[:kk]
+
+
+def svcca_from_reduced(A, B, k=64):
+    qa = np.linalg.qr(A)[0]
+    qb = np.linalg.qr(B)[0]
+    s = np.linalg.svd(qa.T @ qb, compute_uv=False)
+    return float(np.mean(s[:min(k, len(s))]))
+
+
 def svcca(X, Y, k=64, var=0.99):
     """SVCCA: PCA-truncate both views, then mean of the top-k canonical correlations."""
     def red(A):
@@ -435,6 +550,34 @@ def rank_k_recon(Z, mu, V, k):
     return (A @ V[:k].T) @ V[:k] + mu
 
 
+SCRATCH = "/private/tmp/chemprop-rep-study"
+
+
+def cached(key, fn):
+    """Memoise an expensive array build (RDKit targets, random encoder, ECFP, ...)
+    to /private/tmp so experiments 2-6 do not each pay for it."""
+    os.makedirs(SCRATCH, exist_ok=True)
+    path = f"{SCRATCH}/{key}.npy"
+    if os.path.exists(path):
+        return np.load(path, allow_pickle=True)
+    a = fn()
+    np.save(path, a, allow_pickle=True)
+    return a
+
+
+def cached_obj(key, fn):
+    """Same as cached() but for arbitrary Python objects (pickle)."""
+    os.makedirs(SCRATCH, exist_ok=True)
+    path = f"{SCRATCH}/{key}.pkl"
+    if os.path.exists(path):
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+    o = fn()
+    with open(path, "wb") as fh:
+        pickle.dump(o, fh)
+    return o
+
+
 def jdump(obj, path):
     def conv(o):
         if isinstance(o, (np.floating,)):
@@ -449,3 +592,24 @@ def jdump(obj, path):
     with open(path, "w") as fh:
         json.dump(obj, fh, indent=1, default=conv)
     print(f"wrote {path}")
+
+
+def score_target(kind, yte, p, ytr=None):
+    """Unified probe score: R2 for reg, AUROC for cls. Also returns Spearman rho
+    for reg, which is robust to the heavy tails some RDKit descriptors have."""
+    if kind == "reg":
+        v = float(np.var(yte))
+        if v <= 0:
+            return np.nan, np.nan
+        r2 = float(1 - ((p - yte) ** 2).mean() / v)
+        from scipy.stats import spearmanr
+        try:
+            rho = float(spearmanr(p, yte).statistic)
+        except Exception:
+            rho = np.nan
+        return r2, rho
+    from sklearn.metrics import roc_auc_score
+    if len(np.unique(yte)) < 2:
+        return np.nan, np.nan
+    a = float(roc_auc_score(yte, p))
+    return a, a
