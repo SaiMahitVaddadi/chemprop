@@ -87,18 +87,29 @@ And rehydration is **4.4 µs/mol — 23.4× faster** than re-featurizing, verifi
 the featurizer's output. One million molecules fits in about 217 MB, which is memory-mappable, so
 the cache can live on disk and survive across runs.
 
-That last property is the one that matters most in practice, because of this line in
-`chemprop/data/datasets.py`:
+That last property — surviving across processes — is the one that matters, and it's worth being
+precise about what Chemprop does today, because I got this wrong in an earlier draft.
 
-```python
-self.cache = False
-```
+The dataset default is `cache = False` (`chemprop/data/datasets.py:220`), which selects
+`MolGraphCacheOnTheFly` and re-featurizes on every `__getitem__`. But the **CLI overrides it**:
+`chemprop/cli/train.py:2337` runs `if not args.no_cache:` and sets `train_dset.cache = True` and
+`val_dset.cache = True`. So if you train with `chemprop train`, your training and validation sets
+*are* cached in memory, and the per-epoch refeaturization I originally claimed does not happen.
 
-The default is `MolGraphCacheOnTheFly`, which re-featurizes every molecule on **every
-`__getitem__`** — so every epoch. And `MolGraphCache`, the eager version, is in-process only: no
-deduplication of repeated SMILES, no disk persistence. Run a 100-trial hyperparameter sweep and
-you pay full featurization 100 times for identical inputs. At 102 µs/mol that's ten seconds per
-pass over 100k molecules, repeated for every epoch of every trial.
+Three narrower versions of the problem survive, and they're the ones this post is actually about:
+
+- **The Python API does not get the override.** Build a `MoleculeDataset` yourself and you re-featurize
+  every epoch, silently. That puts it alongside two other known CLI-guards-it/API-doesn't gaps
+  (issues #1382, #1383).
+- **Test and prediction datasets are never cached** — only train and val get the override. Inference
+  re-featurizes every time, which is precisely the path this whole series is about.
+- **`MolGraphCache` is in-process only.** No deduplication of repeated SMILES, no disk persistence.
+  So a 100-trial hyperparameter sweep pays full featurization 100 times for identical inputs, and
+  every cross-validation fold starts from zero. At 102 µs/mol that's ten seconds per pass over
+  100k molecules, repeated per trial.
+
+The type-ID representation fixes all three, because 217 B/mol is small enough to memory-map and
+cheap enough to rehydrate that persistence stops being a tradeoff.
 
 ## A one-word bug while we're here
 
