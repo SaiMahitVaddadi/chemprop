@@ -116,6 +116,20 @@ head adapt to whatever the depth-3 embedding actually is.
 
 So the +15–30% is genuine information loss, not readout mismatch. The cheap explanation is gone.
 
+Probing the truncated embeddings says *what* is lost, and it isn't what I'd have guessed. I
+expected local properties to saturate early and global ones to keep improving. They improve
+equally: the fraction of the depth-6 probe score already reached at depth 3 is **0.762 for local
+targets and 0.791 for global ones**, with gains of +0.163 and +0.154 from depth 3 to 6. The only
+thing that saturates is functional-group detection, and it saturates at **depth 1** — 99.6% of its
+final score, with +0.002 left to gain.
+
+What depth 4–6 actually buys is ring-system topology and size: bridgehead-atom count **+0.318**
+(0.335 → 0.653), max ring size +0.287, spiro-atom count +0.245, heavy-atom count and molecular
+weight +0.23 each, graph diameter +0.214. So truncating to depth 3 loses **ring topology and
+molecular size, not chemistry** — the functional groups are all present after one layer. And size
+is on that list for a reason that turns out to be the readout's fault rather than the depth's; see
+Part 11.
+
 One asymmetry is worth stating carefully, because it is the kind of thing that is easy to
 overclaim in either direction. These are truncations of a checkpoint *trained* at depth 6, with
 the depth-6 embedding as the distillation target. A *small* gap would have been strong evidence
